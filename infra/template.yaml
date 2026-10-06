@@ -1,0 +1,457 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Wedding Planner private website, same-origin API, accounts, and persistent planner state
+
+Parameters:
+  OpenAiApiKey:
+    Type: String
+    NoEcho: true
+  SessionSecret:
+    Type: String
+    NoEcho: true
+    MinLength: 32
+  OriginVerifyToken:
+    Type: String
+    NoEcho: true
+    MinLength: 32
+  AdminUsername:
+    Type: String
+    NoEcho: true
+    MinLength: 4
+  AdminPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+  OpenAiModel:
+    Type: String
+    Default: gpt-6.1-sol
+  DomainName:
+    Type: String
+    Default: ''
+    Description: Apex domain served by CloudFront (www redirects to it). Leave empty to use the CloudFront domain.
+  CertificateArn:
+    Type: String
+    Default: ''
+    Description: ACM certificate in us-east-1 covering DomainName and www.DomainName.
+  HostedZoneId:
+    Type: String
+    Default: ''
+    Description: Route 53 hosted zone for DomainName.
+
+Conditions:
+  HasDomain: !Not [!Equals [!Ref DomainName, '']]
+
+Resources:
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-${AWS::AccountId}-${AWS::Region}-web'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Project
+          Value: wedding-planner
+
+  MaterialsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-${AWS::AccountId}-${AWS::Region}-materials'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Project
+          Value: wedding-planner
+
+  PlannerTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub '${AWS::StackName}-state'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      Tags:
+        - Key: Project
+          Value: wedding-planner
+
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-api'
+      RetentionInDays: 14
+
+  ApiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: WeddingPlannerData
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                Resource: !GetAtt PlannerTable.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub '${MaterialsBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt ApiLogGroup.Arn
+
+  ApiFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ApiLogGroup
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-api'
+      Description: Wedding planner API; code updated by scripts/deploy.ps1 and the GitHub deploy workflow
+      Runtime: nodejs22.x
+      Architectures:
+        - arm64
+      Handler: index.handler
+      Role: !GetAtt ApiRole.Arn
+      MemorySize: 1024
+      Timeout: 120
+      ReservedConcurrentExecutions: 10
+      Environment:
+        Variables:
+          NODE_ENV: production
+          DYNAMODB_TABLE: !Ref PlannerTable
+          MATERIALS_BUCKET: !Ref MaterialsBucket
+          OPENAI_API_KEY: !Ref OpenAiApiKey
+          OPENAI_MODEL: !Ref OpenAiModel
+          SESSION_SECRET: !Ref SessionSecret
+          ORIGIN_VERIFY_TOKEN: !Ref OriginVerifyToken
+          ADMIN_USERNAME: !Ref AdminUsername
+          ADMIN_PASSWORD: !Ref AdminPassword
+      Code:
+        ZipFile: |
+          exports.handler = async () => ({ statusCode: 503, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' }, body: JSON.stringify({ error: 'Deployment in progress' }) });
+      Tags:
+        - Key: Project
+          Value: wedding-planner
+
+  ApiFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt ApiFunction.Arn
+      AuthType: NONE
+      InvokeMode: BUFFERED
+
+  ApiUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ApiFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: '*'
+      FunctionUrlAuthType: NONE
+
+  ApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ApiFunction
+      Action: lambda:InvokeFunction
+      Principal: '*'
+      InvokedViaFunctionUrl: true
+
+  StaticOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-static'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  StaticCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub '${AWS::StackName}-static'
+        MinTTL: 0
+        DefaultTTL: 300
+        MaxTTL: 31536000
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: true
+          EnableAcceptEncodingBrotli: true
+          CookiesConfig:
+            CookieBehavior: none
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+
+  SecurityResponseHeaders:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub '${AWS::StackName}-security'
+        SecurityHeadersConfig:
+          ContentTypeOptions:
+            Override: true
+          FrameOptions:
+            FrameOption: DENY
+            Override: true
+          ReferrerPolicy:
+            ReferrerPolicy: strict-origin-when-cross-origin
+            Override: true
+          StrictTransportSecurity:
+            AccessControlMaxAgeSec: 31536000
+            IncludeSubdomains: true
+            Override: true
+          ContentSecurityPolicy:
+            ContentSecurityPolicy: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob: https:; connect-src 'self'; manifest-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+            Override: true
+
+  # Redirects www to the apex domain and serves the single-page app for client routes.
+  SpaRewriteFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub '${AWS::StackName}-spa'
+      AutoPublish: true
+      FunctionConfig:
+        Comment: www redirect and SPA routing without masking API errors
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        function handler(event) {
+          var request = event.request;
+          var host = request.headers.host ? request.headers.host.value : '';
+          if (host.indexOf('www.') === 0) {
+            var query = Object.keys(request.querystring).map(function (key) {
+              var entry = request.querystring[key];
+              return entry.multiValue ? entry.multiValue.map(function (item) { return key + '=' + item.value; }).join('&') : key + '=' + entry.value;
+            }).join('&');
+            return { statusCode: 301, statusDescription: 'Moved Permanently', headers: { location: { value: 'https://' + host.slice(4) + request.uri + (query ? '?' + query : '') }, 'cache-control': { value: 'max-age=3600' } } };
+          }
+          if (request.uri.indexOf('/api') !== 0 && request.uri.indexOf('/invite/') !== 0 && (request.uri.endsWith('/') || request.uri.split('/').pop().indexOf('.') === -1)) {
+            request.uri = '/index.html';
+          }
+          return request;
+        }
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: Wedding planner website and GPT agent
+        Enabled: true
+        IPV6Enabled: true
+        HttpVersion: http2and3
+        PriceClass: PriceClass_200
+        DefaultRootObject: index.html
+        Aliases: !If [HasDomain, [!Ref DomainName, !Sub 'www.${DomainName}'], !Ref 'AWS::NoValue']
+        ViewerCertificate: !If
+          - HasDomain
+          - AcmCertificateArn: !Ref CertificateArn
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          - CloudFrontDefaultCertificate: true
+        Origins:
+          - Id: StaticWebsite
+            DomainName: !GetAtt WebsiteBucket.RegionalDomainName
+            OriginAccessControlId: !Ref StaticOriginAccessControl
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+          - Id: PlannerApi
+            DomainName: !Select [2, !Split ['/', !GetAtt ApiFunctionUrl.FunctionUrl]]
+            OriginCustomHeaders:
+              - HeaderName: x-wedding-origin-token
+                HeaderValue: !Ref OriginVerifyToken
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols:
+                - TLSv1.2
+              OriginReadTimeout: 120
+        DefaultCacheBehavior:
+          TargetOriginId: StaticWebsite
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: !Ref StaticCachePolicy
+          ResponseHeadersPolicyId: !Ref SecurityResponseHeaders
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt SpaRewriteFunction.FunctionARN
+        CacheBehaviors:
+          - PathPattern: /api/*
+            TargetOriginId: PlannerApi
+            ViewerProtocolPolicy: https-only
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            CachedMethods: [GET, HEAD]
+            Compress: true
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+            ResponseHeadersPolicyId: !Ref SecurityResponseHeaders
+          # Invite links are rendered by the API so messenger previews can name the inviter.
+          - PathPattern: /invite/*
+            TargetOriginId: PlannerApi
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD]
+            CachedMethods: [GET, HEAD]
+            Compress: true
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+            ResponseHeadersPolicyId: !Ref SecurityResponseHeaders
+            FunctionAssociations:
+              - EventType: viewer-request
+                FunctionARN: !GetAtt SpaRewriteFunction.FunctionARN
+      Tags:
+        - Key: Project
+          Value: wedding-planner
+
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${WebsiteBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}'
+          - Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt WebsiteBucket.Arn
+              - !Sub '${WebsiteBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  MaterialsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref MaterialsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt MaterialsBucket.Arn
+              - !Sub '${MaterialsBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  ApexRecordIPv4:
+    Type: AWS::Route53::RecordSet
+    Condition: HasDomain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt Distribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+  ApexRecordIPv6:
+    Type: AWS::Route53::RecordSet
+    Condition: HasDomain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: AAAA
+      AliasTarget:
+        DNSName: !GetAtt Distribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+  WwwRecordIPv4:
+    Type: AWS::Route53::RecordSet
+    Condition: HasDomain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub 'www.${DomainName}'
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt Distribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+  WwwRecordIPv6:
+    Type: AWS::Route53::RecordSet
+    Condition: HasDomain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub 'www.${DomainName}'
+      Type: AAAA
+      AliasTarget:
+        DNSName: !GetAtt Distribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+
+Outputs:
+  WebsiteUrl:
+    Value: !If [HasDomain, !Sub 'https://${DomainName}', !Sub 'https://${Distribution.DomainName}']
+  CloudFrontUrl:
+    Value: !Sub 'https://${Distribution.DomainName}'
+  WebsiteBucket:
+    Value: !Ref WebsiteBucket
+  DistributionId:
+    Value: !Ref Distribution
+  ApiFunctionName:
+    Value: !Ref ApiFunction
+  ApiFunctionUrl:
+    Value: !GetAtt ApiFunctionUrl.FunctionUrl
+  PlannerTableName:
+    Value: !Ref PlannerTable
+  MaterialsBucket:
+    Value: !Ref MaterialsBucket

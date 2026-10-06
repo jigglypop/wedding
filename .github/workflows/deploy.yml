@@ -1,0 +1,55 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-northeast-2
+  STACK_NAME: wedding-planner
+  AWS_ROLE_ARN: arn:aws:iam::960243570517:role/wedding-planner-github-deploy
+
+jobs:
+  deploy:
+    name: Test, build and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # The licensed planner templates stay out of this public repository; scripts/deploy.ps1 stores them privately.
+      - name: Fetch private planner data
+        run: |
+          bucket="$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --query "Stacks[0].Outputs[?OutputKey=='MaterialsBucket'].OutputValue" --output text)"
+          mkdir -p data
+          for file in initial-state.json materials.json; do
+            aws s3 cp "s3://$bucket/build-data/$file" "data/$file" --only-show-errors
+          done
+
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+      - name: Publish API and website
+        run: bash scripts/deploy-app.sh

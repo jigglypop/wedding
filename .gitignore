@@ -1,0 +1,20 @@
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+dist-server/
+.deployment/
+.local/
+# Private planner data and licensed guide material (deploy.ps1 keeps a private copy in S3 for CI)
+data/
+api.zip
+*.log
+*.zip
+# Personal reference files kept next to the project
+/*.jpg
+/*.jpeg
+/*.png
+/*.webp
+/*.xls
+/*.xlsx
