@@ -91,11 +91,22 @@ export async function mutateItem<T extends Item>(pk:string, sk:string, change:(c
 }
 
 const counters = new Map<string, number>();
-export async function limit(key:string, max:number, seconds:number, message = '요청이 많아요. 잠시 후 다시 시도해 주세요.') {
-  const bucket = Math.floor(Date.now() / 1000 / seconds); const pk = `LIMIT#${key}#${bucket}`; let count:number;
+const counterKey = (key:string, seconds:number) => { const bucket = Math.floor(Date.now() / 1000 / seconds); return { pk:`LIMIT#${key}#${bucket}`, ttl:(bucket + 2) * seconds }; };
+// Adds one to a fixed-window counter and returns the new total.
+export async function bump(key:string, seconds:number) {
+  const { pk, ttl } = counterKey(key, seconds);
   if (doc) {
-    const result = await doc.send(new UpdateCommand({ TableName:table, Key:{ pk, sk:'COUNT' }, UpdateExpression:'SET expiresAt = :ttl ADD #count :one', ExpressionAttributeNames:{ '#count':'count' }, ExpressionAttributeValues:{ ':ttl':(bucket + 2) * seconds, ':one':1 }, ReturnValues:'UPDATED_NEW' }));
-    count = Number(result.Attributes?.count || 1);
-  } else { count = (counters.get(pk) || 0) + 1; counters.set(pk, count); if (counters.size > 5000) counters.clear(); }
-  if (count > max) throw new HttpError(429, message);
+    const result = await doc.send(new UpdateCommand({ TableName:table, Key:{ pk, sk:'COUNT' }, UpdateExpression:'SET expiresAt = :ttl ADD #count :one', ExpressionAttributeNames:{ '#count':'count' }, ExpressionAttributeValues:{ ':ttl':ttl, ':one':1 }, ReturnValues:'UPDATED_NEW' }));
+    return Number(result.Attributes?.count || 1);
+  }
+  const count = (counters.get(pk) || 0) + 1; counters.set(pk, count); if (counters.size > 5000) counters.clear();
+  return count;
+}
+export async function peek(key:string, seconds:number) {
+  const { pk } = counterKey(key, seconds);
+  if (doc) return Number((await getItem<Item & { count?:number }>(pk, 'COUNT'))?.count || 0);
+  return counters.get(pk) || 0;
+}
+export async function limit(key:string, max:number, seconds:number, message = '요청이 많아요. 잠시 후 다시 시도해 주세요.') {
+  if (await bump(key, seconds) > max) throw new HttpError(429, message);
 }

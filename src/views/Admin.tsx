@@ -17,15 +17,16 @@ const confirmCopy:Partial<Record<Action, [string, string, string]>> = {
 };
 
 export function Admin() {
-  const { run, blocked, notify, data } = usePlanner();
+  const { run, blocked, notify, data, setData } = usePlanner();
   const [users, setUsers] = useState<AdminUser[]|null>(null); const [filter, setFilter] = useState<Filter>('all');
   const [pending, setPending] = useState<{ user:AdminUser; action:Action }|null>(null); const [temporary, setTemporary] = useState<{ username:string; password:string }|null>(null);
-  const load = () => run(async () => setUsers((await api<{ users:AdminUser[] }>('/api/admin/users')).users));
+  const show = (list:AdminUser[]) => { setUsers(list); setData(d => ({ ...d, pendingUsers:list.filter(u => u.status === 'pending').length })); };
+  const load = () => run(async () => show((await api<{ users:AdminUser[] }>('/api/admin/users')).users));
   useEffect(() => { void load(); }, []);
   const act = async (user:AdminUser, action:Action) => {
     const result = await run(async () => api<{ users:AdminUser[]; temporaryPassword?:string }>('/api/admin/users/action', { username:user.username, action }), { approve:'가입을 승인했어요.', activate:'이용을 다시 열었어요.', suspend:'이용을 중지했어요.', reset:'비밀번호를 초기화했어요.', delete:'회원을 삭제했어요.' }[action]);
     if (!result) return;
-    setUsers(result.users); setPending(null);
+    show(result.users); setPending(null);
     if (result.temporaryPassword) setTemporary({ username:user.username, password:result.temporaryPassword });
   };
   const request = (user:AdminUser, action:Action) => confirmCopy[action] ? setPending({ user, action }) : void act(user, action);

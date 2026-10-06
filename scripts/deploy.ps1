@@ -17,6 +17,8 @@ $utf8 = New-Object System.Text.UTF8Encoding($false)
 
 function Invoke-Aws {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
+    # Windows PowerShell 5.1 turns any native stderr line into a terminating error under 'Stop'; rely on the exit code instead.
+    $ErrorActionPreference = 'Continue'
     $result = & aws @Arguments --region $Region --no-cli-pager 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "AWS CLI failed: $($Arguments[0]) $($Arguments[1]). $($result -join [Environment]::NewLine)"
@@ -92,7 +94,7 @@ if (-not $SkipBuild) {
 $webDirectory = Join-Path $workspace 'dist'
 $serverDirectory = Join-Path $workspace 'dist-server'
 $materialsDirectory = Join-Path $workspace 'data/assets'
-foreach ($required in @((Join-Path $webDirectory 'index.html'), (Join-Path $webDirectory 'og-image.png'), (Join-Path $serverDirectory 'index.mjs'), (Join-Path $serverDirectory 'index.html'), (Join-Path $serverDirectory 'data/initial-state.json'), (Join-Path $serverDirectory 'data/materials.json'))) {
+foreach ($required in @((Join-Path $webDirectory 'index.html'), (Join-Path $webDirectory 'og-image.png'), (Join-Path $serverDirectory 'index.mjs'), (Join-Path $serverDirectory 'index.html'), (Join-Path $serverDirectory 'RELEASE'), (Join-Path $serverDirectory 'data/initial-state.json'), (Join-Path $serverDirectory 'data/materials.json'))) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Required build output missing: $required" }
 }
 if (-not (Test-Path -LiteralPath $materialsDirectory -PathType Container)) { throw 'Private materials are missing: data/assets.' }
@@ -173,23 +175,25 @@ try {
             [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $file.FullName, $relativePath, [IO.Compression.CompressionLevel]::Optimal) | Out-Null
         }
     } finally { $archive.Dispose(); $zipStream.Dispose() }
-    Write-Host 'Publishing Lambda bundle and private source materials.'
-    Invoke-Aws -Arguments @('lambda', 'update-function-code', '--function-name', $outputs['ApiFunctionName'], '--zip-file', "fileb://$zipPath", '--query', 'CodeSha256', '--output', 'text') | Out-Null
-    Invoke-Aws -Arguments @('lambda', 'wait', 'function-updated-v2', '--function-name', $outputs['ApiFunctionName']) | Out-Null
+    Write-Host 'Publishing private source materials and website assets.'
     Invoke-Aws -Arguments @('s3', 'sync', $materialsDirectory, "s3://$($outputs['MaterialsBucket'])/", '--only-show-errors', '--sse', 'AES256') | Out-Null
     # The GitHub deploy workflow builds with these private files instead of keeping them in the public repository.
     foreach ($dataFile in @('initial-state.json', 'materials.json')) {
         Invoke-Aws -Arguments @('s3', 'cp', (Join-Path $workspace "data/$dataFile"), "s3://$($outputs['MaterialsBucket'])/build-data/$dataFile", '--only-show-errors', '--sse', 'AES256') | Out-Null
     }
-
-    $release = @{ deployedAt = [DateTime]::UtcNow.ToString('o'); stack = $StackName; indexSha256 = (Get-FileHash -LiteralPath (Join-Path $webDirectory 'index.html') -Algorithm SHA256).Hash.ToLowerInvariant() }
-    [IO.File]::WriteAllText((Join-Path $webDirectory 'release.json'), ($release | ConvertTo-Json), $utf8)
-    Write-Host 'Publishing website and invalidating cached entry pages.'
-    # Hashed assets first (long-lived cache), then other public files; entry pages last.
+    # Hashed assets go up before the new Lambda starts serving invite pages that reference them; entry pages go last.
     if (Test-Path -LiteralPath (Join-Path $webDirectory 'assets')) {
         Invoke-Aws -Arguments @('s3', 'sync', (Join-Path $webDirectory 'assets'), "s3://$($outputs['WebsiteBucket'])/assets/", '--only-show-errors', '--cache-control', 'public,max-age=31536000,immutable', '--sse', 'AES256') | Out-Null
     }
     Invoke-Aws -Arguments @('s3', 'sync', $webDirectory, "s3://$($outputs['WebsiteBucket'])/", '--only-show-errors', '--cache-control', 'public,max-age=3600', '--sse', 'AES256', '--exclude', 'assets/*', '--exclude', 'index.html', '--exclude', 'release.json') | Out-Null
+
+    Write-Host 'Publishing Lambda bundle.'
+    Invoke-Aws -Arguments @('lambda', 'update-function-code', '--function-name', $outputs['ApiFunctionName'], '--zip-file', "fileb://$zipPath", '--query', 'CodeSha256', '--output', 'text') | Out-Null
+    Invoke-Aws -Arguments @('lambda', 'wait', 'function-updated-v2', '--function-name', $outputs['ApiFunctionName']) | Out-Null
+
+    $release = @{ deployedAt = [DateTime]::UtcNow.ToString('o'); stack = $StackName; release = ([IO.File]::ReadAllText((Join-Path $serverDirectory 'RELEASE')).Trim()); indexSha256 = (Get-FileHash -LiteralPath (Join-Path $webDirectory 'index.html') -Algorithm SHA256).Hash.ToLowerInvariant() }
+    [IO.File]::WriteAllText((Join-Path $webDirectory 'release.json'), ($release | ConvertTo-Json), $utf8)
+    Write-Host 'Publishing entry pages and invalidating cached copies.'
     foreach ($entry in @('index.html', 'release.json')) {
         $contentType = if ($entry.EndsWith('.html')) { 'text/html; charset=utf-8' } else { 'application/json' }
         Invoke-Aws -Arguments @('s3', 'cp', (Join-Path $webDirectory $entry), "s3://$($outputs['WebsiteBucket'])/$entry", '--only-show-errors', '--cache-control', 'no-cache,max-age=0,must-revalidate', '--content-type', $contentType, '--sse', 'AES256') | Out-Null

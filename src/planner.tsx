@@ -43,10 +43,10 @@ export interface Planner {
   draft:string; setDraft(value:string):void; sendChat(message?:string):Promise<void>;
   saveItem(collection:Collection, item:Item, success?:string):Promise<boolean>;
   removeItem(collection:Collection, item:Item):Promise<boolean>;
-  saveSettings(settings:Settings):Promise<boolean>;
+  saveSettings(changes:Partial<Settings>, expected:Partial<Settings>):Promise<boolean>;
   setState(state:PlanState):void; setWorkspace(workspace:WorkspaceInfo):void; setData(update:(data:Bootstrap) => Bootstrap):void;
   run<T>(task:() => Promise<T>, success?:string):Promise<T|undefined>;
-  notify(message:string):void;
+  notify(message:string):void; fail(message:string):void; signOut(message?:string):void;
   openEditor(collection:Collection, item?:Item):void; confirmRemove(collection:Collection, item:Item):void;
 }
 export const PlannerContext = createContext<Planner|null>(null);

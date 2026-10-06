@@ -228,6 +228,15 @@ textarea { resize: vertical; line-height: 1.65; }
 .tabbar { display: none; }
 .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 90; display: flex; align-items: center; gap: 10px; max-width: calc(100vw - 32px); padding: 13px 20px; border-radius: 16px; font-size: 14.5px; font-weight: 600; color: #fff; background: rgba(44, 30, 58, .88); box-shadow: var(--shadow-lg); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); animation: rise .25s ease both; }
 .toast svg { color: #8ff0c9; }
+.toast[popover] { top: auto; right: auto; margin: 0; border: 0; overflow: visible; }
+.modal-alert { display: flex; align-items: flex-start; gap: 8px; margin: 14px 22px 0; padding: 8px 6px 8px 14px; border-radius: 14px; font-size: 14px; line-height: 1.6; color: var(--danger); background: rgba(255, 238, 242, .95); border: 1px solid rgba(240, 160, 176, .5); }
+.modal-alert span { flex: 1; padding-top: 2px; }
+.modal-alert > svg { margin-top: 5px; }
+.nav-count { margin-left: auto; min-width: 22px; padding: 1px 7px; border-radius: 999px; font-style: normal; font-size: 12px; font-weight: 800; text-align: center; color: #fff; background: var(--danger); }
+.proposal-card li .badge { flex-shrink: 0; margin-top: 1px; }
+.proposal-card li > span { display: flex; flex-direction: column; min-width: 0; }
+.proposal-card li small { font-size: 13px; color: var(--ink-3); }
+.form-hint { font-size: 13.5px; line-height: 1.6; color: var(--ink-3); text-align: center; }
 
 /* ───────── Sections ───────── */
 .section-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
@@ -654,3 +663,5 @@ td.strong { font-weight: 750; }
   .timeline li { break-inside: avoid; }
   dialog { display: none !important; }
 }
+.leave-link { margin-top: 14px; }
+.editor-note { margin: 14px 22px 0; }

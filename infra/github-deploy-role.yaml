@@ -2,10 +2,10 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: Least-privilege role that lets GitHub Actions on the main branch publish the wedding planner app
 
 Parameters:
-  # GitHub issues subjects pinned to immutable owner/repository IDs (owner@id/repo@id); the name-only form is kept for older tokens.
+  # GitHub issues subjects pinned to immutable owner/repository IDs (owner@id/repo@id), so a re-created repository with the same name is not trusted.
   AllowedSubjects:
     Type: CommaDelimitedList
-    Default: 'repo:jigglypop@52653682/wedding@1407457525:ref:refs/heads/main,repo:jigglypop/wedding:ref:refs/heads/main'
+    Default: 'repo:jigglypop@52653682/wedding@1407457525:ref:refs/heads/main'
   GitHubOidcProviderArn:
     Type: String
     Description: Existing IAM OIDC provider for token.actions.githubusercontent.com
@@ -42,17 +42,13 @@ Resources:
               - Effect: Allow
                 Action: cloudformation:DescribeStacks
                 Resource: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppStackName}/*'
+              # No GetFunction/GetFunctionConfiguration: they would return the function's secret environment.
               - Effect: Allow
-                Action:
-                  - lambda:UpdateFunctionCode
-                  - lambda:GetFunction
-                  - lambda:GetFunctionConfiguration
+                Action: lambda:UpdateFunctionCode
                 Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppStackName}-api'
               - Effect: Allow
                 Action: s3:ListBucket
-                Resource:
-                  - !Sub 'arn:${AWS::Partition}:s3:::${AppStackName}-${AWS::AccountId}-${AWS::Region}-web'
-                  - !Sub 'arn:${AWS::Partition}:s3:::${AppStackName}-${AWS::AccountId}-${AWS::Region}-materials'
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${AppStackName}-${AWS::AccountId}-${AWS::Region}-web'
               - Effect: Allow
                 Action:
                   - s3:GetObject

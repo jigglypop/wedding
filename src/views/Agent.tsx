@@ -1,14 +1,24 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { ArrowRight, BookOpen, Check, CheckCheck, ExternalLink, FileText, LoaderCircle, Send, Sparkles, SquareCheck, Trash2 } from 'lucide-react';
-import { usePlanner } from '../planner';
+import { collectionName, usePlanner } from '../planner';
 import { api } from '../lib/api';
 import { dateLabel, money, safeUrl } from '../lib/format';
-import type { ChatMessage, PlanState } from '../types';
+import type { ChatMessage, PlanState, Proposal } from '../types';
 import { Avatar, Badge, Button, IconButton, Modal } from '../components/ui';
 
 const markdownComponents = { a:({ href, children }:{ href?:string; children?:ReactNode }) => safeUrl(href) ? <a href={safeUrl(href)} target="_blank" rel="noopener noreferrer">{children}</a> : <span>{children}</span>, img:() => null };
 export function Markdown({ children }:{ children:string }) { return <div className="markdown"><ReactMarkdown components={markdownComponents}>{children}</ReactMarkdown></div>; }
+// Labels come from the structured change itself, not the model's description, so a deletion always reads as one.
+function proposalKind(p:Proposal):{ label:string; title:string; tone:'mint'|'gold'|'danger'|'lilac' } {
+  if (p.type === 'settings') return { label:'기본 정보', title:Object.keys(p.settings || {}).map(key => settingLabels[key] || key).join(', '), tone:'lilac' };
+  const name = collectionName[p.collection!] || '항목';
+  const source = (p.type === 'delete' ? p.expectedItem : p.item) || {};
+  const title = String(source.title ?? source.name ?? p.itemId ?? '');
+  if (p.type === 'delete') return { label:`${name} 삭제`, title, tone:'danger' };
+  return { label:`${name} ${p.expectedItem ? '수정' : '추가'}`, title, tone:p.expectedItem ? 'gold' : 'mint' };
+}
+const settingLabels:Record<string, string> = { coupleNames:'노트 이름', weddingDate:'결혼 날짜', venue:'예식 장소', totalBudget:'목표 예산', guestTarget:'예상 하객 수' };
 
 export function Agent() {
   const { state, data, draft, setDraft, sendChat, chatBusy, blocked, run, setState, navigate } = usePlanner();
@@ -37,7 +47,7 @@ export function Agent() {
             })}</div>}
             {!!message.proposals?.length && <div className="proposal-card">
               <div className="proposal-head"><SquareCheck size={16}/><strong>{message.applied ? '노트에 반영했어요' : '이렇게 정리할 수 있어요'}</strong><Badge tone="lilac">{message.proposals.length}개 변경</Badge></div>
-              <ul>{message.proposals.slice(0, 12).map(p => <li key={p.id}><Check size={13}/>{p.description}</li>)}{message.proposals.length > 12 && <li className="more">외 {message.proposals.length - 12}개</li>}</ul>
+              <ul>{message.proposals.slice(0, 12).map(p => { const kind = proposalKind(p); return <li key={p.id}><Badge tone={kind.tone}>{kind.label}</Badge><span><strong>{kind.title}</strong>{p.description && p.description !== kind.title && <small>{p.description}</small>}</span></li>; })}{message.proposals.length > 12 && <li className="more">외 {message.proposals.length - 12}개</li>}</ul>
               {message.applied ? <span className="applied-label"><CheckCheck size={15}/>반영 완료</span> : <Button size="small" disabled={blocked} onClick={() => void apply(message)}><Check size={15}/>제안 전체 반영하기</Button>}
             </div>}
           </div>

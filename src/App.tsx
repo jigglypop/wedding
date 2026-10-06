@@ -5,7 +5,7 @@ import { dday, josa, num, sideLabel, uid } from './lib/format';
 import { collectionName, guestSides, headings, navigation, PlannerContext, rsvpLabels, taskStatus, vendorStatus, views, type Item, type Planner, type View } from './planner';
 import type { Bootstrap, Collection, PlanState, SessionUser, Settings, WorkspaceInfo } from './types';
 import { AuthScreen, Backdrop, BrandMark, InviteScreen } from './components/AuthScreen';
-import { Avatar, Button, IconButton, Modal, Spinner } from './components/ui';
+import { Avatar, Button, FeedbackContext, IconButton, Modal, Spinner, Toast } from './components/ui';
 import { Dashboard } from './views/Dashboard';
 import { Agent } from './views/Agent';
 import { listViews } from './views/Lists';
@@ -26,10 +26,11 @@ export default function App() {
   }, [load]);
   const signedIn = async (user:SessionUser) => { setSession({ checked:true, user }); await load(); };
   const leaveInvite = async () => { clearInviteUrl(); setInvite(null); if (session.user) await load(); };
-  const signedOut = (message?:string) => { setData(null); setSession({ checked:true, user:null }); if (message) setFailure(message); };
+  const signedOut = useCallback((message?:string) => { setData(null); setSession({ checked:true, user:null }); setFailure(message || ''); }, []);
+  const switchAccount = async () => { try { await api('/api/logout', {}); } catch {} setData(null); setSession({ checked:true, user:null }); };
 
   if (!session.checked) return <Splash/>;
-  if (invite) return <InviteScreen code={invite} currentUser={session.user} onLeave={() => void leaveInvite()} onAccepted={async user => { clearInviteUrl(); setInvite(null); await signedIn(user); }}/>;
+  if (invite) return <InviteScreen code={invite} currentUser={session.user} onSwitchAccount={switchAccount} onLeave={() => void leaveInvite()} onAccepted={async user => { clearInviteUrl(); setInvite(null); await signedIn(user); }}/>;
   if (!session.user) return <>{failure && <div className="floating-error" role="alert">{failure}</div>}<AuthScreen onLogin={signedIn}/></>;
   if (!data) return <Splash error={failure} onRetry={() => void load()}/>;
   return <Shell data={data} setData={setData} onSignedOut={signedOut}/>;
@@ -49,15 +50,16 @@ function Shell({ data, setData, onSignedOut }:{ data:Bootstrap; setData:(update:
   const [editor, setEditor] = useState<Editor|null>(null); const [removal, setRemoval] = useState<{ collection:Collection; item:Item }|null>(null);
   const [drawer, setDrawer] = useState(false); const [draft, setDraft] = useState('');
   const state = data.state; const isAdmin = data.user.role === 'admin';
-  const latest = useRef({ version:state.version, busy:false, modal:false });
-  latest.current = { version:state.version, busy:busy || chatBusy, modal:!!editor || !!removal };
+  const latest = useRef({ state, members:data.workspace.members.length, busy:false, modal:false });
+  latest.current = { state, members:data.workspace.members.length, busy:busy || chatBusy, modal:!!editor || !!removal };
   const blocked = busy || chatBusy;
 
   useEffect(() => { const sync = () => { setView(viewFromHash()); setDrawer(false); }; window.addEventListener('popstate', sync); window.addEventListener('hashchange', sync); return () => { window.removeEventListener('popstate', sync); window.removeEventListener('hashchange', sync); }; }, []);
   useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(''), 3800); return () => clearTimeout(timer); }, [toast]);
   useEffect(() => { document.title = view === 'dashboard' ? '우리의 웨딩 노트' : `${navigation.find(n => n.id === view)?.label} · 우리의 웨딩 노트`; }, [view]);
 
-  const setState = useCallback((next:PlanState) => setData(d => d ? { ...d, state:next } : d), [setData]);
+  // Responses can arrive out of order (a slow refresh after a save); an older note never replaces a newer one.
+  const setState = useCallback((next:PlanState) => setData(d => d && next.version >= d.state.version ? { ...d, state:next } : d), [setData]);
   const setWorkspace = useCallback((workspace:WorkspaceInfo) => setData(d => d ? { ...d, workspace } : d), [setData]);
   const fail = useCallback(async (e:unknown) => {
     if (e instanceof ApiError && e.status === 401) { onSignedOut('접속이 만료되었어요. 다시 로그인해 주세요.'); return; }
@@ -75,13 +77,16 @@ function Shell({ data, setData, onSignedOut }:{ data:Bootstrap; setData:(update:
   useEffect(() => {
     const pull = async () => {
       if (document.hidden || latest.current.busy || latest.current.modal) return;
-      try { const result = await api<{ unchanged?:boolean; state?:PlanState }>(`/api/state?since=${latest.current.version}`); if (result.state && result.state.version !== latest.current.version) setState(result.state); }
-      catch (e) { if (e instanceof ApiError && e.status === 401) onSignedOut('접속이 만료되었어요. 다시 로그인해 주세요.'); }
+      try {
+        const result = await api<{ state?:PlanState; memberCount?:number }>(`/api/state?since=${latest.current.state.version}`);
+        if (result.state) setState(result.state);
+        if (result.memberCount !== undefined && result.memberCount !== latest.current.members) setWorkspace((await api<{ workspace:WorkspaceInfo }>('/api/workspace')).workspace);
+      } catch (e) { if (e instanceof ApiError && e.status === 401) onSignedOut('접속이 만료되었어요. 다시 로그인해 주세요.'); }
     };
     const timer = setInterval(pull, 30000); const onVisible = () => { if (!document.hidden) void pull(); };
     document.addEventListener('visibilitychange', onVisible);
     return () => { clearInterval(timer); document.removeEventListener('visibilitychange', onVisible); };
-  }, [setState, onSignedOut]);
+  }, [setState, setWorkspace, onSignedOut]);
 
   const navigate = useCallback((target:View) => {
     setDrawer(false); setError('');
@@ -89,9 +94,11 @@ function Shell({ data, setData, onSignedOut }:{ data:Bootstrap; setData:(update:
     history.pushState(null, '', target === 'dashboard' ? location.pathname : `#/${target}`);
     setView(target); window.scrollTo({ top:0 });
   }, []);
-  const saveItem = useCallback(async (collection:Collection, item:Item, success = '저장했어요.') => !!(await run(async () => { setState((await api<{ state:PlanState }>('/api/items', { collection, item })).state); return true; }, success)), [run, setState]);
-  const removeItem = useCallback(async (collection:Collection, item:Item) => !!(await run(async () => { setState((await api<{ state:PlanState }>('/api/items/delete', { collection, id:item.id })).state); return true; }, '삭제했어요.')), [run, setState]);
-  const saveSettings = useCallback(async (settings:Settings) => !!(await run(async () => { setState((await api<{ state:PlanState }>('/api/settings', { settings }, 'PUT')).state); return true; }, '기본 정보를 저장했어요.')), [run, setState]);
+  // Writes send the copy shown on screen, so the server can refuse to overwrite a partner's newer edit.
+  const shown = (collection:Collection, id:string) => (latest.current.state[collection] as Item[]).find(row => row.id === id) ?? null;
+  const saveItem = useCallback(async (collection:Collection, item:Item, success = '저장했어요.') => !!(await run(async () => { setState((await api<{ state:PlanState }>('/api/items', { collection, item, expected:shown(collection, item.id) })).state); return true; }, success)), [run, setState]);
+  const removeItem = useCallback(async (collection:Collection, item:Item) => !!(await run(async () => { setState((await api<{ state:PlanState }>('/api/items/delete', { collection, id:item.id, expected:shown(collection, item.id) ?? undefined })).state); return true; }, '삭제했어요.')), [run, setState]);
+  const saveSettings = useCallback(async (changes:Partial<Settings>, expected:Partial<Settings>) => !!(await run(async () => { setState((await api<{ state:PlanState }>('/api/settings', { settings:changes, expected }, 'PUT')).state); return true; }, '기본 정보를 저장했어요.')), [run, setState]);
   const sendChat = useCallback(async (message?:string) => {
     const text = (message ?? draft).trim();
     if (!text || busy || chatBusy || !data.agentReady) return;
@@ -105,9 +112,10 @@ function Shell({ data, setData, onSignedOut }:{ data:Bootstrap; setData:(update:
   const planner = useMemo<Planner>(() => ({
     data, state, blocked, busy, chatBusy, isAdmin, navigate, ask:(message:string) => { setDraft(message); navigate('agent'); },
     draft, setDraft, sendChat, saveItem, removeItem, saveSettings, setState, setWorkspace,
-    setData:(update:(d:Bootstrap) => Bootstrap) => setData(d => d ? update(d) : d), run, notify:setToast,
+    setData:(update:(d:Bootstrap) => Bootstrap) => setData(d => d ? update(d) : d), run, notify:setToast, fail:setError, signOut:onSignedOut,
     openEditor:(collection:Collection, item?:Item) => setEditor({ collection, item }), confirmRemove:(collection:Collection, item:Item) => setRemoval({ collection, item })
-  }), [data, state, blocked, busy, chatBusy, isAdmin, navigate, draft, sendChat, saveItem, removeItem, saveSettings, setState, setWorkspace, setData, run]);
+  }), [data, state, blocked, busy, chatBusy, isAdmin, navigate, draft, sendChat, saveItem, removeItem, saveSettings, setState, setWorkspace, setData, run, onSignedOut]);
+  const feedback = useMemo(() => ({ error, clear:() => setError('') }), [error]);
 
   const current = view === 'admin' && !isAdmin ? 'dashboard' : view;
   const [eyebrow, title, subtitle] = headings[current];
@@ -118,7 +126,7 @@ function Shell({ data, setData, onSignedOut }:{ data:Bootstrap; setData:(update:
   const groups = [...new Set(nav.map(n => n.group))];
   const mobileTabs:View[] = ['dashboard', 'tasks', 'agent', 'budgets'];
 
-  return <PlannerContext.Provider value={planner}>
+  return <PlannerContext.Provider value={planner}><FeedbackContext.Provider value={feedback}>
     <div className="app-shell"><Backdrop/>
       <aside className={`sidebar glass ${drawer ? 'open' : ''}`} aria-label="주 메뉴">
         <div className="sidebar-head"><button type="button" className="brand" onClick={() => navigate('dashboard')}><BrandMark size={38}/><span><strong>우리의 웨딩 노트</strong><small>OUR WEDDING NOTE</small></span></button><IconButton className="drawer-close" label="메뉴 닫기" onClick={() => setDrawer(false)}><X size={20}/></IconButton></div>
@@ -127,7 +135,7 @@ function Shell({ data, setData, onSignedOut }:{ data:Bootstrap; setData:(update:
           <strong>{state.settings.coupleNames || members.map(m => m.name).join(' ♥ ')}</strong>
           <span><CalendarDays size={13}/>{state.settings.weddingDate ? new Date(`${state.settings.weddingDate}T00:00:00`).toLocaleDateString('ko-KR', { year:'numeric', month:'long', day:'numeric' }) : '결혼 날짜를 정해 주세요'}<em>{countdown.label}</em></span>
         </div>
-        <nav>{groups.map(group => <div className="nav-group" key={group}><span className="nav-label">{group}</span>{nav.filter(n => n.group === group).map(({ id, label, icon:Icon }) => <button type="button" key={id} className={`nav-item ${current === id ? 'active' : ''}`} onClick={() => navigate(id)} aria-current={current === id ? 'page' : undefined}><Icon size={19}/><span>{label}</span>{id === 'agent' && <em className="nav-tag">AI</em>}</button>)}</div>)}</nav>
+        <nav>{groups.map(group => <div className="nav-group" key={group}><span className="nav-label">{group}</span>{nav.filter(n => n.group === group).map(({ id, label, icon:Icon }) => <button type="button" key={id} className={`nav-item ${current === id ? 'active' : ''}`} onClick={() => navigate(id)} aria-current={current === id ? 'page' : undefined}><Icon size={19}/><span>{label}</span>{id === 'agent' && <em className="nav-tag">AI</em>}{id === 'admin' && !!data.pendingUsers && <em className="nav-count" aria-label={`승인 대기 ${data.pendingUsers}명`}>{data.pendingUsers}</em>}</button>)}</div>)}</nav>
         <div className="sidebar-foot"><div className="me"><Avatar name={data.user.name} side={data.user.side} size="small"/><span><strong>{data.user.name}</strong><small>{sideLabel[data.user.side]}{isAdmin ? ' · 관리자' : ''}</small></span></div><IconButton label="로그아웃" onClick={() => void logout()} disabled={blocked}><LogOut size={18}/></IconButton></div>
       </aside>
       {drawer && <button type="button" className="drawer-scrim" aria-label="메뉴 닫기" onClick={() => setDrawer(false)}/>}
@@ -151,10 +159,10 @@ function Shell({ data, setData, onSignedOut }:{ data:Bootstrap; setData:(update:
       </main>
       <nav className="tabbar glass" aria-label="빠른 메뉴">{mobileTabs.map(id => { const item = navigation.find(n => n.id === id)!; const Icon = item.icon; return <button type="button" key={id} className={current === id ? 'active' : ''} onClick={() => navigate(id)} aria-current={current === id ? 'page' : undefined}><Icon size={21}/><span>{item.short}</span></button>; })}<button type="button" className={drawer || !mobileTabs.includes(current) ? 'active' : ''} onClick={() => setDrawer(true)}><Ellipsis size={21}/><span>전체</span></button></nav>
     </div>
-    {toast && <div className="toast" role="status"><Check size={17}/>{toast}</div>}
-    {editor && <ItemEditor key={`${editor.collection}-${editor.item?.id || 'new'}`} editor={editor} busy={blocked} onClose={() => setEditor(null)} onSave={async item => { if (await saveItem(editor.collection, item, editor.item ? '수정했어요.' : `${josa(collectionName[editor.collection], '을/를')} 추가했어요.`)) setEditor(null); }}/>}
+    {toast && <Toast message={toast}/>}
+    {editor && <ItemEditor key={`${editor.collection}-${editor.item?.id || 'new'}`} editor={editor} current={editor.item ? shown(editor.collection, editor.item.id) : null} busy={blocked} onClose={() => setEditor(null)} onSave={async item => { if (await saveItem(editor.collection, item, editor.item ? '수정했어요.' : `${josa(collectionName[editor.collection], '을/를')} 추가했어요.`)) setEditor(null); }}/>}
     {removal && <Modal title={`${collectionName[removal.collection]} 삭제`} onClose={() => setRemoval(null)} busy={blocked}><div className="confirm-body"><p>‘{'title' in removal.item ? removal.item.title : removal.item.name}’ 항목을 삭제할까요?</p><span>함께 쓰는 분의 노트에서도 삭제돼요.</span></div><div className="modal-actions"><Button kind="secondary" disabled={blocked} onClick={() => setRemoval(null)}>취소</Button><Button kind="danger" busy={blocked} onClick={async () => { if (await removeItem(removal.collection, removal.item)) setRemoval(null); }}><Trash2 size={15}/>삭제하기</Button></div></Modal>}
-  </PlannerContext.Provider>;
+  </FeedbackContext.Provider></PlannerContext.Provider>;
 }
 
 type Field = { name:string; label:string; type?:'text'|'number'|'date'|'time'|'url'|'tel'|'select'|'textarea'; options?:[string, string][]; required?:boolean; placeholder?:string; wide?:boolean; max?:number; min?:number; maxLength?:number };
@@ -168,16 +176,24 @@ const fields:Record<Collection, Field[]> = {
 };
 const defaults:Record<Collection, Record<string, unknown>> = { tasks:{ title:'', category:'', dueDate:'', status:'todo', notes:'' }, budgets:{ title:'', category:'', planned:0, actual:0, paid:0, notes:'' }, vendors:{ name:'', category:'', status:'researching', price:0, contact:'', url:'', notes:'' }, guests:{ name:'', side:'other', group:'', people:1, rsvp:'pending', table:'', contact:'', notes:'' }, timeline:{ time:'', title:'', owner:'', notes:'' }, notes:{ title:'', content:'', category:'' } };
 
-function ItemEditor({ editor, onClose, onSave, busy }:{ editor:Editor; onClose:() => void; onSave:(item:Item) => Promise<void>; busy:boolean }) {
-  const [values, setValues] = useState<Record<string, unknown>>({ ...defaults[editor.collection], ...editor.item });
+function ItemEditor({ editor, current, onClose, onSave, busy }:{ editor:Editor; current:Item|null; onClose:() => void; onSave:(item:Item) => Promise<void>; busy:boolean }) {
+  const [form, setForm] = useState(() => { const initial:Record<string, unknown> = { ...defaults[editor.collection], ...editor.item }; return { base:initial, values:initial }; });
+  // When the partner's newer copy arrives (e.g. after a conflict), adopt it in every field this person has not edited.
+  useEffect(() => {
+    if (!editor.item || !current) return;
+    setForm(({ base, values }) => { const latest = { ...current } as Record<string, unknown>; return { base:latest, values:Object.fromEntries(Object.keys({ ...values, ...latest }).map(key => [key, values[key] === base[key] ? latest[key] : values[key]])) }; });
+  }, [current, editor.item]);
+  const values = form.values;
+  const deleted = !!editor.item && !current;
   const submit = async (event:FormEvent) => {
     event.preventDefault();
     const result:Record<string, unknown> = { ...values, id:editor.item?.id || uid() };
     for (const field of fields[editor.collection]) { if (field.type === 'number') result[field.name] = field.name === 'people' ? Math.max(1, Math.round(num(result[field.name]))) : num(result[field.name]); else if (typeof result[field.name] === 'string') result[field.name] = (result[field.name] as string).trim(); }
     await onSave(result as unknown as Item);
   };
-  const set = (name:string, value:unknown) => setValues(v => ({ ...v, [name]:value }));
+  const set = (name:string, value:unknown) => setForm(f => ({ ...f, values:{ ...f.values, [name]:value } }));
   return <Modal title={`${collectionName[editor.collection]} ${editor.item ? '수정' : '추가'}`} onClose={onClose} busy={busy}>
+    {deleted && <p className="form-note editor-note">함께 쓰는 분이 이 항목을 삭제했어요. 저장하면 다시 추가돼요.</p>}
     <form onSubmit={submit}>
       <div className="form-grid modal-body">{fields[editor.collection].map(field => <label className={`field ${field.wide ? 'wide' : ''}`} key={field.name}>
         <span>{field.label}{field.required && <i className="required" aria-hidden="true">*</i>}</span>

@@ -3,9 +3,9 @@ import { readFile } from 'node:fs/promises';
 import { extname, resolve } from 'node:path';
 import { z } from 'zod';
 import type { ChatMessage, Collection, Material, PlanState } from '../src/types';
-import { HttpError, limit, storageKind } from './db';
-import { hashPassword, safeEqual, sessionCookie, sessionNeedsRefresh, sha256, verifyPassword } from './auth';
-import { acceptInviteAsUser, acceptInviteWithSignup, adminAction, createInvite, createWorkspace, detachMember, ensureAdmin, getUser, getWorkspace, listUsers, nameSchema, oppositeSide, passwordSchema, publicUser, resolveInvite, revokeInvite, sessionUser, sideSchema, signUp, updateUser, usernameSchema, workspaceInfo, type UserRecord } from './accounts';
+import { HttpError, bump, limit, mutateItem, peek, storageKind, type Item } from './db';
+import { hashPassword, randomToken, safeEqual, sessionCookie, sessionNeedsRefresh, sha256, verifyPassword } from './auth';
+import { acceptInviteAsUser, acceptInviteWithSignup, adminAction, adminUsername, createInvite, detachMember, ensureAdmin, ensureMembership, getUser, listUsers, nameSchema, oppositeSide, passwordSchema, pendingCount, publicUser, resolveInvite, revokeInvite, sessionUser, sideSchema, signUp, updateUser, usernameSchema, workspaceInfo, type UserRecord } from './accounts';
 import { MAIN_WORKSPACE, addMaterial, getMaterials, getState, mutateState, removeMaterial, saveState, uploadedMaterials } from './store';
 import { ValidationError, addActivity, applyProposals, collectionLabels, collections, itemLabel, itemSchemas, settingsSchema, validateState } from './model';
 import { runAgent } from './agent';
@@ -20,6 +20,10 @@ const materialSummary = ({ content:_content, ...rest }:Material):Material => res
 const collectionSchema = z.enum(collections as [Collection, ...Collection[]]);
 const loginSchema = z.object({ username:z.string().trim().toLowerCase().max(100), password:z.string().min(1, '비밀번호를 입력해 주세요.').max(200) });
 const tooMany = '로그인 시도가 많아요. 15분 뒤 다시 시도해 주세요.';
+const notFound = () => new HttpError(404, '요청한 기능을 찾을 수 없어요.');
+const stale = () => new HttpError(409, '함께 쓰는 분이 먼저 바꾼 내용이 있어요. 최신 노트를 불러왔으니 확인 후 다시 시도해 주세요.', 'conflict');
+// Compares flat records regardless of key order.
+const canonical = (value:unknown) => JSON.stringify(value && typeof value === 'object' ? Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([, v]) => v !== undefined).sort(([a], [b]) => a.localeCompare(b))) : value ?? null);
 
 function parseBody(event:Event):unknown {
   if (!event.body) return {};
@@ -27,6 +31,7 @@ function parseBody(event:Event):unknown {
   if (Buffer.byteLength(body) > 4500000) throw new HttpError(413, '파일은 3MB 이하로 올려 주세요.');
   try { return JSON.parse(body); } catch { throw new HttpError(400, '요청 내용을 확인해 주세요.'); }
 }
+function decode(segment:string) { try { return decodeURIComponent(segment); } catch { throw notFound(); } }
 // CloudFront appends the viewer address to X-Forwarded-For, so values a client sends itself are ignored.
 function clientIp(headers:Record<string, string|undefined>, sourceIp?:string) {
   const viewer = headers['cloudfront-viewer-address'];
@@ -35,14 +40,47 @@ function clientIp(headers:Record<string, string|undefined>, sourceIp?:string) {
   while (chain.length > 1 && chain[chain.length - 1] === sourceIp) chain.pop();
   return chain[chain.length - 1] || sourceIp || 'unknown';
 }
+// IPv6 clients usually control a whole /64, so limits apply to that prefix.
+function ipBucket(ip:string) {
+  const v4 = ip.match(/(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (v4 || !ip.includes(':')) return v4?.[1] || ip;
+  const [head = '', tail = ''] = ip.toLowerCase().split('::');
+  const left = head ? head.split(':') : []; const right = tail ? tail.split(':') : [];
+  const groups = ip.includes('::') ? [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill('0'), ...right] : left;
+  return `${groups.slice(0, 4).map(g => g.replace(/^0+(?=.)/, '')).join(':')}::/64`;
+}
 async function checkCredentials(input:{ username:string; password:string }, ip:string) {
-  await limit(`login-ip:${sha256(ip)}`, 20, 900, tooMany);
-  await limit(`login-user:${sha256(input.username)}`, 10, 900, tooMany);
-  if (input.username && input.username === (process.env.ADMIN_USERNAME || '').trim().toLowerCase()) await ensureAdmin();
+  await limit(`login-ip:${sha256(ipBucket(ip))}`, 30, 900, tooMany);
+  const failures = `login-fail:${sha256(input.username)}`;
+  if (await peek(failures, 900) >= 10) throw new HttpError(429, tooMany);
+  if (input.username && input.username === adminUsername()) await ensureAdmin();
   const user = /^[a-z0-9_]{1,40}$/.test(input.username) ? await getUser(input.username) : null;
-  if (!(await verifyPassword(input.password, user?.passwordHash)) || !user) throw new HttpError(401, '아이디 또는 비밀번호를 확인해 주세요.');
+  if (!(await verifyPassword(input.password, user?.passwordHash)) || !user) { await bump(failures, 900); throw new HttpError(401, '아이디 또는 비밀번호를 확인해 주세요.'); }
   if (user.status === 'suspended') throw new HttpError(403, '이용이 잠시 중지된 계정이에요. 관리자에게 문의해 주세요.', 'suspended');
   return user;
+}
+// Issues the cookie only if nothing about the account changed while the password was being checked.
+async function signIn(checked:UserRecord) {
+  return updateUser(checked.username, u => {
+    if (u.sessionVersion !== checked.sessionVersion || u.passwordHash !== checked.passwordHash || u.status !== 'active') throw new HttpError(409, '계정 정보가 방금 바뀌었어요. 다시 로그인해 주세요.');
+    return { ...u, lastLoginAt:new Date().toISOString(), accountId:u.accountId || randomToken(12) };
+  });
+}
+// Excel saves Korean CSV as CP949 more often than UTF-8.
+function decodeText(data:Buffer) {
+  const utf8 = new TextDecoder('utf-8').decode(data);
+  if (!utf8.includes('�')) return utf8;
+  try { return new TextDecoder('euc-kr').decode(data); } catch { return utf8; }
+}
+// One AI consultation at a time per note keeps a couple from filling the shared Lambda capacity.
+async function withChatLock<T>(workspace:string, task:() => Promise<T>) {
+  const key = `LOCK#chat#${workspace}`; const until = Date.now() + 150000;
+  await mutateItem<Item & { until?:number }>(key, 'LOCK', current => {
+    if (current?.until && current.until > Date.now()) throw new HttpError(429, '이미 다른 상담에 답하고 있어요. 답변이 끝난 뒤 다시 보내 주세요.');
+    return { pk:key, sk:'LOCK', until, expiresAt:Math.floor(until / 1000) + 3600 };
+  });
+  try { return await task(); }
+  finally { await mutateItem<Item & { until?:number }>(key, 'LOCK', current => current?.until === until ? { ...current, until:0 } : null).catch(() => undefined); }
 }
 const escapeHtml = (value:string) => value.replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]!));
 
@@ -73,25 +111,28 @@ export async function handler(event:Event):Promise<Result> {
     const headers = Object.fromEntries(Object.entries(event.headers || {}).map(([k, v]) => [k.toLowerCase(), v]));
     if (process.env.NODE_ENV === 'production' && (!process.env.ORIGIN_VERIFY_TOKEN || !safeEqual(headers['x-wedding-origin-token'] || '', process.env.ORIGIN_VERIFY_TOKEN))) throw new HttpError(403, '허용되지 않는 접근입니다.');
     if (method === 'OPTIONS') return json(403, { error:'다른 사이트에서는 접근할 수 없습니다.' });
-    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && headers['sec-fetch-site'] === 'cross-site') throw new HttpError(403, '다른 사이트에서는 변경할 수 없습니다.');
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+      if (headers['sec-fetch-site'] === 'cross-site') throw new HttpError(403, '다른 사이트에서는 변경할 수 없습니다.');
+      if (event.body && !(headers['content-type'] || '').toLowerCase().includes('application/json')) throw new HttpError(415, '요청 형식을 확인해 주세요.');
+    }
     const cookies = [...(event.cookies || []), headers.cookie || ''].join(';');
     const ip = clientIp(headers, event.requestContext.http.sourceIp);
     const query = new URLSearchParams(event.rawQueryString || '');
 
-    if ((method === 'GET' || method === 'HEAD') && path.startsWith('/invite/')) return invitePage(decodeURIComponent(path.slice('/invite/'.length).split('/')[0]));
+    if ((method === 'GET' || method === 'HEAD') && path.startsWith('/invite/')) return invitePage(decode(path.slice('/invite/'.length).split('/')[0]));
     if (path === '/api/health' && method === 'GET') return json(200, { ok:true, service:'wedding-planner', version:process.env.RELEASE_ID || 'local', storage:storageKind, agentReady:!!process.env.OPENAI_API_KEY });
 
     // Public account endpoints
     if (path === '/api/session' && method === 'GET') { const auth = await sessionUser(cookies); return json(200, { authenticated:!!auth, user:auth ? publicUser(auth.user) : null }); }
     if (path === '/api/logout' && method === 'POST') return json(200, { ok:true }, [sessionCookie(null)]);
     if (path === '/api/login' && method === 'POST') {
-      const user = await checkCredentials(loginSchema.parse(parseBody(event)), ip);
+      const user = await ensureMembership(await checkCredentials(loginSchema.parse(parseBody(event)), ip));
       if (user.status === 'pending') throw new HttpError(403, '가입 신청을 확인하고 있어요. 관리자 승인 후 로그인할 수 있어요.', 'pending');
-      const updated = await updateUser(user.username, u => ({ ...u, lastLoginAt:new Date().toISOString() }));
-      return json(200, { user:publicUser(updated) }, [sessionCookie(updated)]);
+      const signed = await signIn(user);
+      return json(200, { user:publicUser(signed) }, [sessionCookie(signed)]);
     }
     if (path === '/api/signup' && method === 'POST') {
-      await limit(`signup-ip:${sha256(ip)}`, 10, 3600, '가입 신청이 많아요. 잠시 후 다시 시도해 주세요.');
+      await limit(`signup-ip:${sha256(ipBucket(ip))}`, 10, 3600, '가입 신청이 많아요. 잠시 후 다시 시도해 주세요.');
       const input = z.object({ username:usernameSchema, password:passwordSchema, name:nameSchema, side:z.enum(['groom', 'bride']) }).parse(parseBody(event));
       await limit('signup-all', 100, 86400, '오늘은 가입 신청이 많아요. 내일 다시 시도해 주세요.');
       await signUp(input);
@@ -99,34 +140,37 @@ export async function handler(event:Event):Promise<Result> {
     }
     const invitePath = path.match(/^\/api\/invites\/([A-Za-z0-9_-]{1,64})(\/accept)?$/);
     if (invitePath && method === 'GET' && !invitePath[2]) {
-      await limit(`invite-view:${sha256(ip)}`, 60, 900);
+      await limit(`invite-view:${sha256(ipBucket(ip))}`, 60, 900);
       const { invite } = await resolveInvite(invitePath[1]);
-      return json(200, { invite:{ inviterName:invite.inviterName, side:invite.side, expiresAt:new Date(invite.expiresAt * 1000).toISOString() } });
+      const viewer = await sessionUser(cookies);
+      return json(200, { invite:{ inviterName:invite.inviterName, side:invite.side, expiresAt:new Date(invite.expiresAt * 1000).toISOString(), mine:viewer?.user.workspaceId === invite.workspaceId } });
     }
     if (invitePath && method === 'POST' && invitePath[2]) {
-      await limit(`invite-accept:${sha256(ip)}`, 15, 3600, '요청이 많아요. 잠시 후 다시 시도해 주세요.');
+      await limit(`invite-accept:${sha256(ipBucket(ip))}`, 15, 3600, '요청이 많아요. 잠시 후 다시 시도해 주세요.');
       const body = parseBody(event); const code = invitePath[1];
       const { mode } = z.object({ mode:z.enum(['signup', 'login', 'session']) }).parse(body);
       let user:UserRecord;
-      if (mode === 'signup') user = await acceptInviteWithSignup(code, z.object({ username:usernameSchema, password:passwordSchema, name:nameSchema }).parse(body));
-      else if (mode === 'login') user = await acceptInviteAsUser(code, await checkCredentials(loginSchema.parse(body), ip));
+      if (mode === 'signup') {
+        const input = z.object({ username:usernameSchema, password:passwordSchema, name:nameSchema }).parse(body);
+        await limit('signup-all', 100, 86400, '오늘은 가입 신청이 많아요. 내일 다시 시도해 주세요.');
+        user = await acceptInviteWithSignup(code, input);
+      } else if (mode === 'login') user = await acceptInviteAsUser(code, await checkCredentials(loginSchema.parse(body), ip));
       else { const auth = await sessionUser(cookies); if (!auth) throw new HttpError(401, '로그인이 필요해요.', 'unauthorized'); user = await acceptInviteAsUser(code, auth.user); }
       return json(200, { user:publicUser(user) }, [sessionCookie(user)]);
     }
 
     const auth = await sessionUser(cookies);
     if (!auth) throw new HttpError(401, '로그인이 필요해요.', 'unauthorized');
-    const { user, session } = auth; const ws = user.workspaceId;
+    const { user, session, workspace:meta } = auth; const ws = user.workspaceId;
     const refreshed = sessionNeedsRefresh(session) ? [sessionCookie(user)] : undefined;
 
     if (path === '/api/bootstrap' && method === 'GET') {
-      if (!(await getWorkspace(ws))) await createWorkspace(user.username, ws).catch(() => undefined);
       const [state, materials, workspace] = await Promise.all([getState(ws), getMaterials(ws), workspaceInfo(ws)]);
-      return json(200, { user:publicUser(user), workspace, state, materials:materials.map(materialSummary), agentReady:!!process.env.OPENAI_API_KEY, model:process.env.OPENAI_MODEL || 'gpt-6.1-sol', privateLibrary:ws === MAIN_WORKSPACE }, refreshed);
+      return json(200, { user:publicUser(user), workspace, state, materials:materials.map(materialSummary), agentReady:!!process.env.OPENAI_API_KEY, model:process.env.OPENAI_MODEL || 'gpt-6.1-sol', privateLibrary:ws === MAIN_WORKSPACE, ...(user.role === 'admin' ? { pendingUsers:await pendingCount() } : {}) }, refreshed);
     }
     if (path === '/api/state' && method === 'GET') {
-      const state = await getState(ws);
-      return json(200, Number(query.get('since')) === state.version ? { unchanged:true, version:state.version } : { state }, refreshed);
+      const state = await getState(ws); const memberCount = meta.members.length;
+      return json(200, Number(query.get('since')) === state.version ? { unchanged:true, version:state.version, memberCount } : { state, memberCount }, refreshed);
     }
     if (path === '/api/workspace' && method === 'GET') return json(200, { workspace:await workspaceInfo(ws) });
     if (path === '/api/state' && method === 'PUT') {
@@ -139,12 +183,14 @@ export async function handler(event:Event):Promise<Result> {
       addActivity(next, '백업 파일로 노트를 복원했어요', user.name);
       return json(200, { state:await saveState(ws, next, version) });
     }
+    // Item writes carry the copy the person was looking at; a partner's newer edit is never silently overwritten.
     if (path === '/api/items' && method === 'POST') {
-      const { collection, item } = z.object({ collection:collectionSchema, item:z.record(z.string(), z.unknown()) }).parse(parseBody(event));
+      const { collection, item, expected } = z.object({ collection:collectionSchema, item:z.record(z.string(), z.unknown()), expected:z.record(z.string(), z.unknown()).nullable().optional() }).parse(parseBody(event));
       const parsed = itemSchemas[collection].parse(item) as unknown as Record<string, unknown>;
       const state = await mutateState(ws, draft => {
         const rows = draft[collection] as unknown as Record<string, unknown>[];
         const index = rows.findIndex(row => row.id === parsed.id); const previous = rows[index];
+        if (expected !== undefined && canonical(previous ?? null) !== canonical(expected)) throw stale();
         if (index >= 0) rows[index] = parsed; else rows.push(parsed);
         const verb = !previous ? '추가' : collection === 'tasks' && previous.status !== parsed.status && parsed.status === 'done' ? '완료' : '수정';
         addActivity(draft, `${collectionLabels[collection]} ${verb} · ${itemLabel(parsed)}`, user.name);
@@ -152,19 +198,24 @@ export async function handler(event:Event):Promise<Result> {
       return json(200, { state });
     }
     if (path === '/api/items/delete' && method === 'POST') {
-      const { collection, id } = z.object({ collection:collectionSchema, id:z.string().min(1).max(100) }).parse(parseBody(event));
+      const { collection, id, expected } = z.object({ collection:collectionSchema, id:z.string().min(1).max(100), expected:z.record(z.string(), z.unknown()).optional() }).parse(parseBody(event));
       const state = await mutateState(ws, draft => {
         const rows = draft[collection] as unknown as Record<string, unknown>[];
         const index = rows.findIndex(row => row.id === id);
         if (index < 0) return null;
+        if (expected && canonical(rows[index]) !== canonical(expected)) throw stale();
         const [removed] = rows.splice(index, 1);
         addActivity(draft, `${collectionLabels[collection]} 삭제 · ${itemLabel(removed)}`, user.name);
       });
       return json(200, { state });
     }
     if (path === '/api/settings' && method === 'PUT') {
-      const { settings } = z.object({ settings:settingsSchema }).parse(parseBody(event));
-      const state = await mutateState(ws, draft => { draft.settings = settings; addActivity(draft, '웨딩 기본 정보 수정', user.name); });
+      const { settings, expected } = z.object({ settings:settingsSchema.partial(), expected:settingsSchema.partial().optional() }).parse(parseBody(event));
+      const state = await mutateState(ws, draft => {
+        for (const [key, value] of Object.entries(expected || {})) if (draft.settings[key as keyof typeof draft.settings] !== value) throw stale();
+        draft.settings = settingsSchema.parse({ ...draft.settings, ...settings });
+        addActivity(draft, '웨딩 기본 정보 수정', user.name);
+      });
       return json(200, { state });
     }
 
@@ -173,24 +224,28 @@ export async function handler(event:Event):Promise<Result> {
       const state = await getState(ws); const duplicate = state.conversations.find(m => m.id === requestId);
       if (duplicate) return json(200, { state, message:duplicate });
       await limit(`chat-minute:${ws}`, 6, 60, 'AI 상담 요청이 많아요. 1분 뒤 다시 시도해 주세요.');
-      await limit(`chat-day:${ws}`, ws === MAIN_WORKSPACE ? 100 : 30, 86400, '오늘의 AI 상담 횟수를 모두 사용했어요. 내일 다시 이용해 주세요.');
-      await limit('chat-day-all', 300, 86400, '오늘은 AI 상담 요청이 많아 잠시 쉬어요. 내일 다시 이용해 주세요.');
-      const askedAt = new Date().toISOString(); const materials = await getMaterials(ws);
-      let reply:ChatMessage;
-      try { reply = await runAgent(state, materials, message, user.name); }
-      catch (e) {
-        if (e instanceof HttpError) throw e;
-        const status = (e as { status?:number }).status;
-        throw new HttpError(status === 429 ? 429 : 502, status === 429 ? 'OpenAI 사용 한도에 도달했어요. API 결제와 사용 한도를 확인해 주세요.' : 'AI 상담에 연결하지 못했어요. 잠시 후 다시 시도해 주세요.');
-      }
-      reply.id = requestId;
-      const saved = await mutateState(ws, draft => {
-        if (draft.conversations.some(m => m.id === requestId)) return null;
-        draft.conversations.push({ id:`${requestId}-user`, role:'user', content:message, at:askedAt, by:user.name }, reply);
-        draft.conversations = draft.conversations.slice(-24);
-        while (JSON.stringify(draft.conversations).length > 65000 && draft.conversations.length > 2) draft.conversations.splice(0, 2);
+      const dailyLimit = '오늘의 AI 상담 횟수를 모두 사용했어요. 내일 다시 이용해 주세요.';
+      if (ws === MAIN_WORKSPACE) await limit('chat-day:main', 100, 86400, dailyLimit);
+      else { await limit(`chat-day:${ws}`, 30, 86400, dailyLimit); await limit('chat-day:others', 200, 86400, '오늘은 AI 상담 요청이 많아 잠시 쉬어요. 내일 다시 이용해 주세요.'); }
+      return await withChatLock(ws, async () => {
+        const askedAt = new Date().toISOString(); const materials = await getMaterials(ws);
+        let reply:ChatMessage;
+        try { reply = await runAgent(state, materials, message, user.name); }
+        catch (e) {
+          if (e instanceof HttpError) throw e;
+          const status = (e as { status?:number }).status;
+          throw new HttpError(status === 429 ? 429 : 502, status === 429 ? 'OpenAI 사용 한도에 도달했어요. API 결제와 사용 한도를 확인해 주세요.' : 'AI 상담에 연결하지 못했어요. 잠시 후 다시 시도해 주세요.');
+        }
+        reply.id = requestId;
+        const saved = await mutateState(ws, draft => {
+          if (draft.conversations.some(m => m.id === requestId)) return null;
+          draft.conversations.push({ id:`${requestId}-user`, role:'user', content:message, at:askedAt, by:user.name }, reply);
+          draft.conversations = draft.conversations.slice(-24);
+          // Byte budgets: keep chat history modest and the whole note under the storage cap.
+          while ((Buffer.byteLength(JSON.stringify(draft.conversations)) > 120000 || Buffer.byteLength(JSON.stringify(draft)) > 330000) && draft.conversations.length > 2) draft.conversations.splice(0, 2);
+        });
+        return json(200, { state:saved, message:reply });
       });
-      return json(200, { state:saved, message:reply });
     }
     if (path === '/api/chat/apply' && method === 'POST') {
       const { messageId } = z.object({ messageId:z.string().min(1).max(100), version:z.number().int().positive().optional() }).parse(parseBody(event));
@@ -216,6 +271,15 @@ export async function handler(event:Event):Promise<Result> {
     }
 
     if (path === '/api/materials' && method === 'GET') return json(200, { materials:(await getMaterials(ws)).map(materialSummary) });
+    // Signed preview links for every image in one call, so the grid does not fan out into one Lambda call per picture.
+    if (path === '/api/materials/previews' && method === 'GET') {
+      const urls:Record<string, string> = {};
+      for (const m of await getMaterials(ws)) {
+        if (!m.thumbnail && !(m.filename && mimeOf(m).startsWith('image/'))) continue;
+        urls[m.id] = remoteFiles ? await signedUrl(m.thumbnail || m.filename!, m.thumbnail ? 'image/webp' : mimeOf(m), 3600) : `/api/materials/${encodeURIComponent(m.id)}${m.thumbnail ? '?thumb=1' : ''}`;
+      }
+      return json(200, { urls, expiresIn:3600 });
+    }
     if (path === '/api/materials/upload' && method === 'POST') {
       const body = z.object({ filename:z.string().min(1).max(200), data:z.string().min(1), title:z.string().trim().min(1).max(200), category:z.string().trim().max(100).optional() }).parse(parseBody(event));
       const extension = extname(body.filename).toLowerCase(); const mimeType = mimeByExtension[extension];
@@ -227,12 +291,12 @@ export async function handler(event:Event):Promise<Result> {
       await limit(`uploads:${ws}`, 50, 86400, '오늘 올릴 수 있는 자료 수(50개)를 모두 사용했어요.');
       const id = randomUUID(); const filename = `uploads/${ws}/${id}${extension}`;
       await saveUpload(filename, data, mimeType);
-      const material:Material = { id, title:body.title, category:body.category || '업로드 자료', kind:mimeType.startsWith('image/') ? 'image' : 'file', filename, originalFilename:body.filename, mimeType, sourceType:'upload', summary:`${user.name}님이 올린 자료`, ...(extension === '.txt' || extension === '.csv' ? { content:data.toString('utf8').slice(0, 20000) } : {}) };
+      const material:Material = { id, title:body.title, category:body.category || '업로드 자료', kind:mimeType.startsWith('image/') ? 'image' : 'file', filename, originalFilename:body.filename, mimeType, sourceType:'upload', summary:`${user.name}님이 올린 자료`, ...(extension === '.txt' || extension === '.csv' ? { content:decodeText(data).slice(0, 20000) } : {}) };
       await addMaterial(ws, material);
       return json(200, { material:materialSummary(material) });
     }
     if (path.startsWith('/api/materials/') && method === 'DELETE') {
-      const id = decodeURIComponent(path.slice('/api/materials/'.length));
+      const id = decode(path.slice('/api/materials/'.length));
       const material = (await uploadedMaterials(ws)).find(m => m.id === id);
       if (!material) throw new HttpError(404, '직접 올린 자료만 삭제할 수 있어요.');
       if (material.filename) await deleteUpload(material.filename);
@@ -240,7 +304,7 @@ export async function handler(event:Event):Promise<Result> {
       return json(200, { ok:true });
     }
     if (path.startsWith('/api/materials/') && method === 'GET') {
-      const id = decodeURIComponent(path.slice('/api/materials/'.length));
+      const id = decode(path.slice('/api/materials/'.length));
       const material = (await getMaterials(ws)).find(m => m.id === id);
       if (!material) throw new HttpError(404, '자료를 찾을 수 없어요.');
       if (query.get('format') === 'json') return json(200, { material:{ ...material, content:material.content?.slice(0, 60000) } });
@@ -256,16 +320,20 @@ export async function handler(event:Event):Promise<Result> {
 
     if (path === '/api/invite' && method === 'POST') {
       const { side } = z.object({ side:z.enum(['groom', 'bride']).optional() }).parse(parseBody(event));
+      await limit(`invite-create:${sha256(user.username)}`, 10, 86400, '오늘은 초대 링크를 더 만들 수 없어요. 내일 다시 시도해 주세요.');
       return json(200, { workspace:await createInvite(user, side || oppositeSide(user.side)) });
     }
-    if (path === '/api/invite' && method === 'DELETE') return json(200, { workspace:await revokeInvite(user) });
+    if (path === '/api/invite' && method === 'DELETE') return json(200, { workspace:await revokeInvite(ws) });
     if (path === '/api/members/remove' && method === 'POST') {
       const { username } = z.object({ username:z.string().min(1).max(40) }).parse(parseBody(event));
-      const workspace = await getWorkspace(ws);
-      if (!workspace || workspace.owner !== user.username) throw new HttpError(403, '노트를 만든 분만 함께하는 사람을 내보낼 수 있어요.');
+      if (meta.owner !== user.username) throw new HttpError(403, '노트를 만든 분만 함께하는 사람을 내보낼 수 있어요.');
       if (username === user.username) throw new HttpError(400, '본인은 내보낼 수 없어요.');
       await detachMember(ws, username);
       return json(200, { workspace:await workspaceInfo(ws) });
+    }
+    if (path === '/api/members/leave' && method === 'POST') {
+      const moved = await detachMember(ws, user.username);
+      return json(200, { status:moved.status }, [sessionCookie(null)]);
     }
     if (path === '/api/account/profile' && method === 'POST') {
       const input = z.object({ name:nameSchema, side:sideSchema }).parse(parseBody(event));
@@ -289,7 +357,7 @@ export async function handler(event:Event):Promise<Result> {
         return json(200, { ...result, users:await listUsers() });
       }
     }
-    throw new HttpError(404, '요청한 기능을 찾을 수 없어요.');
+    throw notFound();
   } catch (e) {
     if (e instanceof z.ZodError) { const message = e.issues[0]?.message || ''; return json(400, { error:/[가-힣]/.test(message) ? message : '입력 내용을 확인해 주세요.' }); }
     if (e instanceof HttpError) return json(e.status, { error:e.message, ...(e.code ? { code:e.code } : {}) });

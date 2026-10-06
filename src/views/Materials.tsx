@@ -26,23 +26,39 @@ function Detail({ material }:{ material:Material }) {
   return detail.content ? <Markdown>{readable(detail.content)}</Markdown> : null;
 }
 
+// Phone photos are often larger than the 3MB upload limit; resize them in the browser before sending.
+async function shrinkImage(file:File) {
+  if (!/^image\/(jpeg|png|webp)$/.test(file.type) || file.size <= 2.5 * 1024 * 1024) return file;
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, 2560 / Math.max(bitmap.width, bitmap.height));
+  const canvas = Object.assign(document.createElement('canvas'), { width:Math.round(bitmap.width * scale), height:Math.round(bitmap.height * scale) });
+  const context = canvas.getContext('2d')!;
+  context.fillStyle = '#ffffff'; context.fillRect(0, 0, canvas.width, canvas.height); context.drawImage(bitmap, 0, 0, canvas.width, canvas.height); bitmap.close();
+  const blob = await new Promise<Blob|null>(done => canvas.toBlob(done, 'image/jpeg', 0.85));
+  return blob ? new File([blob], `${file.name.replace(/\.[^.]+$/, '')}.jpg`, { type:'image/jpeg' }) : file;
+}
+
 export function Materials() {
-  const { data, setData, run, blocked, ask, notify } = usePlanner();
+  const { data, setData, run, blocked, ask, fail } = usePlanner();
   const [search, setSearch] = useState(''); const [category, setCategory] = useState('all');
   const [open, setOpen] = useState<Material|null>(null); const [removing, setRemoving] = useState<Material|null>(null);
+  const [previews, setPreviews] = useState<Record<string, string>>({});
   const input = useRef<HTMLInputElement>(null);
+  const imageCount = data.materials.filter(isImage).length;
+  useEffect(() => { if (!imageCount) return; let alive = true; api<{ urls:Record<string, string> }>('/api/materials/previews').then(r => { if (alive) setPreviews(r.urls); }).catch(() => undefined); return () => { alive = false; }; }, [imageCount]);
   const term = search.trim().toLowerCase();
   const rows = data.materials.filter(m => (category === 'all' || m.category === category) && (!term || `${m.title} ${m.summary || ''} ${m.category}`.toLowerCase().includes(term)));
   const categories = [...new Set(data.materials.map(m => m.category))].filter(Boolean).sort((a, b) => a.localeCompare(b, 'ko'));
-  const upload = async (file?:File) => {
-    if (!file || blocked) return;
-    if (file.size > 3 * 1024 * 1024) { notify('자료는 파일당 3MB까지 올릴 수 있어요.'); if (input.current) input.current.value = ''; return; }
+  const upload = async (picked?:File) => {
+    if (input.current) input.current.value = '';
+    if (!picked || blocked) return;
+    const file = await shrinkImage(picked).catch(() => picked);
+    if (file.size > 3 * 1024 * 1024) { fail('자료는 파일당 3MB까지 올릴 수 있어요. 더 작은 파일로 다시 시도해 주세요.'); return; }
     await run(async () => {
       const base64 = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(',')[1] || ''); reader.onerror = () => reject(new Error('파일을 읽지 못했어요.')); reader.readAsDataURL(file); });
-      const result = await api<{ material:Material }>('/api/materials/upload', { filename:file.name, data:base64, title:file.name.replace(/\.[^.]+$/, '').slice(0, 200) || '업로드 자료', category:'업로드 자료' });
+      const result = await api<{ material:Material }>('/api/materials/upload', { filename:file.name, data:base64, title:picked.name.replace(/\.[^.]+$/, '').slice(0, 200) || '업로드 자료', category:'업로드 자료' });
       setData(d => ({ ...d, materials:[...d.materials, result.material] }));
     }, '자료를 보관함에 추가했어요.');
-    if (input.current) input.current.value = '';
   };
   const remove = async () => {
     if (!removing) return; const target = removing;
@@ -57,7 +73,7 @@ export function Materials() {
     </div>
     <p className="collection-info">자료 {data.materials.length}개 · 이미지, PDF, 엑셀, CSV, 텍스트(파일당 3MB) · 올린 자료는 AI 플래너가 함께 읽을 수 있어요.</p>
     {rows.length ? <div className="tile-grid materials">{rows.map(m => <button type="button" className="tile material-tile" key={m.id} onClick={() => setOpen(m)}>
-      <span className={`material-cover ${isImage(m) ? 'image' : ''} tone-${[...m.id].reduce((sum, c) => sum + c.charCodeAt(0), 0) % 3}`}>{isImage(m) ? <img src={fileUrl(m, true)} alt="" loading="lazy" decoding="async"/> : <><CoverIcon m={m}/><span>{coverLabel(m)}</span></>}<Badge>{m.category || '참고 자료'}</Badge></span>
+      <span className={`material-cover ${isImage(m) ? 'image' : ''} tone-${[...m.id].reduce((sum, c) => sum + c.charCodeAt(0), 0) % 3}`}>{isImage(m) ? (previews[m.id] ? <img src={previews[m.id]} alt="" loading="lazy" decoding="async"/> : <ImageIcon size={30}/>) : <><CoverIcon m={m}/><span>{coverLabel(m)}</span></>}<Badge>{m.category || '참고 자료'}</Badge></span>
       <span className="material-info"><strong>{m.title}</strong><span>{m.summary || m.originalFilename || '결혼 준비 참고 자료'}</span></span>
     </button>)}</div> : <section className="card"><Empty icon={BookOpen} title={term || category !== 'all' ? '찾는 자료가 없어요' : '결혼 준비 자료를 모아 보세요'} description={term || category !== 'all' ? '검색어나 분류를 바꿔 확인해 주세요.' : '계약서, 견적서, 참고 이미지를 올려 두면 AI 플래너가 함께 읽고 정리해 드려요.'} action={!term && category === 'all' && uploadButton}/></section>}
     {open && <Modal title={open.title} onClose={() => setOpen(null)} wide>

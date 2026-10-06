@@ -44,7 +44,7 @@ export function AuthScreen({ onLogin }:{ onLogin:(user:SessionUser) => Promise<v
   if (submitted) return <AuthLayout><div className="auth-card glass result-card">
     <span className="result-icon"><Hourglass size={26}/></span>
     <h2>가입 신청이 접수되었어요</h2>
-    <p>관리자가 확인하고 승인하면 바로 로그인할 수 있어요.<br/>{form.side === 'bride' ? '신랑' : '신부'}에게 초대 링크를 받았다면, 그 링크로 가입하면 승인 없이 바로 함께 쓸 수 있어요.</p>
+    <p>관리자가 확인하고 승인하면 바로 로그인할 수 있어요.<br/>{form.side === 'bride' ? '신랑' : '신부'}에게 초대 링크를 받았다면, 링크를 열고 ‘계정이 있어요’에서 방금 만든 아이디로 로그인하면 승인 없이 바로 함께 쓸 수 있어요.</p>
     <Button onClick={() => { setSubmitted(false); switchMode('login'); }}>로그인 화면으로<ArrowRight size={17}/></Button>
   </div></AuthLayout>;
   return <AuthLayout><form className="auth-card glass" onSubmit={submit}>
@@ -58,17 +58,18 @@ export function AuthScreen({ onLogin }:{ onLogin:(user:SessionUser) => Promise<v
     <label className="field"><span>비밀번호</span><PasswordInput value={form.password} onChange={password => update({ password })} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} placeholder={mode === 'login' ? '비밀번호' : '영문과 숫자를 섞어 8자 이상'}/></label>
     {mode === 'signup' && <label className="field"><span>비밀번호 확인</span><PasswordInput value={form.confirm} onChange={confirm => update({ confirm })} autoComplete="new-password" placeholder="한 번 더 입력해 주세요"/></label>}
     {error && <p className="form-error" role="alert"><CircleAlert size={16}/>{error}</p>}
+    {mode === 'signup' && <p className="form-hint">초대 링크를 받았다면 여기 말고 그 링크를 열어 가입해 주세요. 승인 없이 바로 시작돼요.</p>}
     <Button type="submit" busy={busy} className="block">{mode === 'login' ? '웨딩 노트 열기' : '가입 신청하기'}{!busy && <ArrowRight size={18}/>}</Button>
     <p className="auth-switch">{mode === 'login' ? <>아직 계정이 없나요? <button type="button" onClick={() => switchMode('signup')}>회원가입</button></> : <>이미 계정이 있나요? <button type="button" onClick={() => switchMode('login')}>로그인</button></>}</p>
   </form></AuthLayout>;
 }
 
-export function InviteScreen({ code, currentUser, onAccepted, onLeave }:{ code:string; currentUser:SessionUser|null; onAccepted:(user:SessionUser) => Promise<void>; onLeave:() => void }) {
+export function InviteScreen({ code, currentUser, onAccepted, onLeave, onSwitchAccount }:{ code:string; currentUser:SessionUser|null; onAccepted:(user:SessionUser) => Promise<void>; onLeave:() => void; onSwitchAccount:() => Promise<void> }) {
   const [invite, setInvite] = useState<InvitePreview|null>(null); const [problem, setProblem] = useState('');
   const [mode, setMode] = useState<'signup'|'login'>('signup');
   const [form, setForm] = useState({ username:'', password:'', confirm:'', name:'' });
   const [busy, setBusy] = useState(false); const [error, setError] = useState('');
-  useEffect(() => { api<{ invite:InvitePreview }>(`/api/invites/${encodeURIComponent(code)}`).then(r => setInvite(r.invite)).catch((e:ApiError) => setProblem(e.message)); }, [code]);
+  useEffect(() => { api<{ invite:InvitePreview }>(`/api/invites/${encodeURIComponent(code)}`).then(r => setInvite(r.invite)).catch((e:ApiError) => setProblem(e.message)); }, [code, currentUser?.username]);
   const update = (patch:Partial<typeof form>) => { setForm(current => ({ ...current, ...patch })); setError(''); };
   const accept = async (body:Record<string, string>) => {
     if (busy) return; setBusy(true); setError('');
@@ -83,14 +84,18 @@ export function InviteScreen({ code, currentUser, onAccepted, onLeave }:{ code:s
   if (problem) return <AuthLayout><div className="auth-card glass result-card"><span className="result-icon muted"><CircleAlert size={26}/></span><h2>초대장을 열 수 없어요</h2><p>{problem}</p><Button onClick={onLeave}>{currentUser ? '내 노트로 가기' : '로그인 화면으로'}<ArrowRight size={17}/></Button></div></AuthLayout>;
   if (!invite) return <AuthLayout><div className="auth-card glass result-card"><Spinner label="초대장을 펼치는 중이에요"/></div></AuthLayout>;
   const role = sideLabel[invite.side];
-  const notice = <p className="form-note"><CircleAlert size={15}/>이미 쓰던 노트가 있다면, 수락 후에는 {invite.inviterName}님의 노트를 함께 쓰게 되고 혼자 쓰던 노트는 정리돼요.</p>;
+  const notice = <p className="form-note"><CircleAlert size={15}/>이미 혼자 쓰던 노트가 있다면, 수락 후에는 {invite.inviterName}님의 노트를 함께 쓰고 원래 노트는 더 이상 열 수 없어요. 필요하면 먼저 그 노트의 설정에서 백업을 내려받아 주세요.</p>;
   return <AuthLayout><div className="auth-card glass invite-card">
     <div className="invitation"><span className="envelope"><Mail size={26}/></span><span className="eyebrow">WEDDING NOTE INVITATION</span><h2>{invite.inviterName}님이<br/>함께 준비하자고 초대했어요</h2><p><CalendarHeart size={15}/>{role}님을 위한 초대장 · {new Date(invite.expiresAt).toLocaleDateString('ko-KR', { month:'long', day:'numeric' })}까지 유효</p></div>
-    {currentUser ? <div className="invite-actions">
+    {currentUser && invite.mine ? <div className="invite-actions">
+      <p className="signed-in-as">내 노트에서 보낸 초대장이에요. 받는 분이 이 링크를 열어 가입하면 바로 함께 쓸 수 있어요.</p>
+      <Button className="block" onClick={onLeave}>내 노트로 가기<ArrowRight size={18}/></Button>
+    </div> : currentUser ? <div className="invite-actions">
       <p className="signed-in-as"><strong>{currentUser.name}</strong>({currentUser.username}) 계정으로 로그인되어 있어요.</p>
       {notice}
       {error && <p className="form-error" role="alert"><CircleAlert size={16}/>{error}</p>}
       <Button busy={busy} className="block" onClick={() => void accept({ mode:'session' })}>이 계정으로 함께하기{!busy && <ArrowRight size={18}/>}</Button>
+      <Button kind="secondary" className="block" onClick={() => void onSwitchAccount()} disabled={busy}>다른 계정으로 참여하기</Button>
       <Button kind="ghost" className="block" onClick={onLeave} disabled={busy}>나중에 할게요</Button>
     </div> : <form onSubmit={submit} className="invite-form">
       <Segmented label="가입 또는 로그인" value={mode} onChange={next => { setMode(next); setError(''); }} options={[['signup', '처음이에요'], ['login', '계정이 있어요']]}/>

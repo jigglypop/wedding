@@ -32,11 +32,11 @@ export async function verifyPassword(password:string, stored?:string) {
   return key.length === expected.length && timingSafeEqual(key, expected);
 }
 
-export type Session = { u:string; v:number; e:number };
+export type Session = { u:string; a:string; v:number; e:number };
 const cookieFlags = (maxAge:number) => `Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`;
-export function sessionCookie(user:{ username:string; sessionVersion:number }|null) {
+export function sessionCookie(user:{ username:string; accountId:string; sessionVersion:number }|null) {
   if (!user) return `${cookieName}=; ${cookieFlags(0)}`;
-  const body = Buffer.from(JSON.stringify({ u:user.username, v:user.sessionVersion, e:Date.now() + sessionDays * 86400000 } satisfies Session)).toString('base64url');
+  const body = Buffer.from(JSON.stringify({ u:user.username, a:user.accountId, v:user.sessionVersion, e:Date.now() + sessionDays * 86400000 } satisfies Session)).toString('base64url');
   return `${cookieName}=${body}.${sign(body)}; ${cookieFlags(sessionDays * 86400)}`;
 }
 export function readSession(cookies:string):Session|null {
@@ -45,7 +45,7 @@ export function readSession(cookies:string):Session|null {
     const [body, sig] = token.split('.');
     if (!body || !sig || !safeEqual(sig, sign(body))) return null;
     const data = JSON.parse(Buffer.from(body, 'base64url').toString()) as Partial<Session>;
-    return typeof data.u === 'string' && typeof data.v === 'number' && typeof data.e === 'number' && data.e > Date.now() ? data as Session : null;
+    return typeof data.u === 'string' && typeof data.a === 'string' && typeof data.v === 'number' && typeof data.e === 'number' && data.e > Date.now() ? data as Session : null;
   } catch { return null; }
 }
 export const sessionNeedsRefresh = (session:Session) => session.e - Date.now() < (sessionDays - 7) * 86400000;

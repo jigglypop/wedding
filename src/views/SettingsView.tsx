@@ -13,12 +13,17 @@ export function SettingsView({ onLogout }:{ onLogout:() => void }) {
   </div>;
 }
 
+const settingKeys = ['coupleNames', 'weddingDate', 'venue', 'totalBudget', 'guestTarget'] as const;
+const pick = (source:Settings, keys:readonly (keyof Settings)[]) => Object.fromEntries(keys.map(key => [key, source[key]])) as Partial<Settings>;
 function WeddingInfo() {
   const { state, saveSettings, blocked } = usePlanner();
-  const [values, setValues] = useState<Settings>(state.settings); const [dirty, setDirty] = useState(false);
-  useEffect(() => { if (!dirty) setValues(state.settings); }, [state.settings, dirty]);
-  const change = (name:keyof Settings, value:string) => { setDirty(true); setValues(v => ({ ...v, [name]:name === 'totalBudget' || name === 'guestTarget' ? num(value) : value })); };
-  const submit = async (event:FormEvent) => { event.preventDefault(); if (await saveSettings(values)) setDirty(false); };
+  // `base` is what the server last said; only fields changed from it are sent, so a partner's edits elsewhere are kept.
+  const [form, setForm] = useState({ base:state.settings, values:state.settings });
+  useEffect(() => setForm(({ base, values }) => ({ base:state.settings, values:Object.fromEntries(settingKeys.map(key => [key, values[key] === base[key] ? state.settings[key] : values[key]])) as unknown as Settings })), [state.settings]);
+  const values = form.values;
+  const changed = settingKeys.filter(key => form.values[key] !== form.base[key]); const dirty = changed.length > 0;
+  const change = (name:keyof Settings, value:string) => setForm(f => ({ ...f, values:{ ...f.values, [name]:name === 'totalBudget' || name === 'guestTarget' ? num(value) : value } }));
+  const submit = async (event:FormEvent) => { event.preventDefault(); if (dirty) await saveSettings(pick(form.values, changed), pick(form.base, changed)); };
   return <form className="card settings-card" onSubmit={submit}>
     <div className="section-title"><h2><Heart size={18}/>두 사람의 기본 정보</h2>{dirty && <Badge tone="gold">저장 전</Badge>}</div>
     <div className="form-grid">
@@ -33,9 +38,14 @@ function WeddingInfo() {
 }
 
 function Members() {
-  const { data, setWorkspace, run, blocked, notify } = usePlanner();
+  const { data, setWorkspace, run, blocked, notify, signOut } = usePlanner();
   const { workspace, user } = data;
-  const [confirm, setConfirm] = useState<string|null>(null);
+  const [confirm, setConfirm] = useState<string|null>(null); const [leaving, setLeaving] = useState(false);
+  const partner = workspace.members.find(m => m.username !== user.username);
+  const leave = async () => {
+    const result = await run(async () => api<{ status:string }>('/api/members/leave', {}));
+    if (result) signOut(result.status === 'pending' ? '노트에서 나왔어요. 새 노트는 관리자 승인 후 로그인해서 쓸 수 있어요.' : '노트에서 나왔어요. 다시 로그인하면 새 노트가 열려요.');
+  };
   useEffect(() => { api<{ workspace:WorkspaceInfo }>('/api/workspace').then(r => setWorkspace(r.workspace)).catch(() => undefined); }, []);
   const owner = workspace.members.find(m => m.owner)?.username === user.username;
   const target:Side = user.side === 'bride' ? 'groom' : 'bride';
@@ -61,7 +71,9 @@ function Members() {
         <Button onClick={() => void create()} busy={blocked}><UserPlus size={16}/>{sideLabel[target]} 초대 링크 만들기</Button>
       </>}
     </div>}
-    {confirm && <Modal title="함께하는 사람 내보내기" onClose={() => setConfirm(null)} busy={blocked}><div className="confirm-body"><p>이 분을 노트에서 내보낼까요?</p><span>내보낸 분은 바로 로그아웃되고, 다음 로그인부터 새 노트를 쓰게 돼요. 지금까지의 기록은 이 노트에 그대로 남아요.</span></div><div className="modal-actions"><Button kind="secondary" onClick={() => setConfirm(null)} disabled={blocked}>취소</Button><Button kind="danger" busy={blocked} onClick={() => void removeMember()}><UserMinus size={15}/>내보내기</Button></div></Modal>}
+    {partner && user.role !== 'admin' && <button type="button" className="text-link danger leave-link" onClick={() => setLeaving(true)} disabled={blocked}><LogOut size={14}/>이 노트에서 나가기</button>}
+    {leaving && partner && <Modal title="이 노트에서 나가기" onClose={() => setLeaving(false)} busy={blocked}><div className="confirm-body"><p>{partner.name}님과 함께 쓰던 노트에서 나갈까요?</p><span>지금까지의 기록은 {partner.name}님의 노트에 그대로 남고, 나는 새 노트로 옮겨지며 로그아웃돼요. 초대 링크로 가입한 계정은 관리자 승인 후 새 노트를 쓸 수 있어요.</span></div><div className="modal-actions"><Button kind="secondary" onClick={() => setLeaving(false)} disabled={blocked}>취소</Button><Button kind="danger" busy={blocked} onClick={() => void leave()}><LogOut size={15}/>나가기</Button></div></Modal>}
+    {confirm && <Modal title="함께하는 사람 내보내기" onClose={() => setConfirm(null)} busy={blocked}><div className="confirm-body"><p>이 분을 노트에서 내보낼까요?</p><span>내보낸 분은 바로 로그아웃되고 지금까지의 기록은 이 노트에 그대로 남아요. 초대 링크로 가입한 분이라면 관리자 승인 후에 자기 노트를 쓸 수 있어요.</span></div><div className="modal-actions"><Button kind="secondary" onClick={() => setConfirm(null)} disabled={blocked}>취소</Button><Button kind="danger" busy={blocked} onClick={() => void removeMember()}><UserMinus size={15}/>내보내기</Button></div></Modal>}
   </section>;
 }
 

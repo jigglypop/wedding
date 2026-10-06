@@ -15,6 +15,6 @@ export interface Material { id:string;title:string;kind?:string;category:string;
 export interface SessionUser { username:string;name:string;side:Side;role:'admin'|'member';workspaceId:string }
 export interface Member { username:string;name:string;side:Side;owner:boolean }
 export interface WorkspaceInfo { id:string;members:Member[];maxMembers:number;invite:{code:string;side:Side;expiresAt:string}|null }
-export interface Bootstrap { user:SessionUser;workspace:WorkspaceInfo;state:PlanState;materials:Material[];agentReady:boolean;model:string;privateLibrary:boolean }
+export interface Bootstrap { user:SessionUser;workspace:WorkspaceInfo;state:PlanState;materials:Material[];agentReady:boolean;model:string;privateLibrary:boolean;pendingUsers?:number }
 export interface AdminUser { username:string;name:string;side:Side;role:'admin'|'member';status:'pending'|'active'|'suspended';workspaceId:string;createdAt:string;approvedAt?:string;lastLoginAt?:string;invitedBy?:string;partners:string[] }
-export interface InvitePreview { inviterName:string;side:Side;expiresAt:string }
+export interface InvitePreview { inviterName:string;side:Side;expiresAt:string;mine?:boolean }

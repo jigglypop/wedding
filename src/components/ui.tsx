@@ -1,5 +1,14 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { Heart, LoaderCircle, X } from 'lucide-react';
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { Check, CircleAlert, Heart, LoaderCircle, X } from 'lucide-react';
+
+// A modal <dialog> sits in the browser's top layer, so page-level errors would hide behind its backdrop; modals render them too.
+export const FeedbackContext = createContext<{ error:string; clear:() => void }>({ error:'', clear:() => undefined });
+type PopoverElement = HTMLDivElement & { showPopover?:() => void; hidePopover?:() => void };
+export function Toast({ message }:{ message:string }) {
+  const ref = useRef<PopoverElement>(null);
+  useEffect(() => { const element = ref.current; if (!element?.showPopover) return; try { element.hidePopover?.(); } catch {} try { element.showPopover(); } catch {} }, [message]);
+  return <div ref={ref} className="toast" role="status" popover="manual"><Check size={17}/>{message}</div>;
+}
 
 type ButtonProps = { children:ReactNode; onClick?:() => void; kind?:'primary'|'secondary'|'ghost'|'danger'|'soft'; size?:'small'|'normal'; type?:'button'|'submit'; disabled?:boolean; busy?:boolean; className?:string; title?:string };
 export function Button({ children, onClick, kind = 'primary', size = 'normal', type = 'button', disabled = false, busy = false, className = '', title }:ButtonProps) {
@@ -18,9 +27,11 @@ export function Avatar({ name, side, size = 'normal' }:{ name:string; side?:stri
 }
 export function Modal({ title, children, onClose, busy = false, wide = false }:{ title:string; children:ReactNode; onClose:() => void; busy?:boolean; wide?:boolean }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const feedback = useContext(FeedbackContext);
   useEffect(() => { const element = dialog.current; if (element && !element.open) element.showModal(); return () => element?.close(); }, []);
   return <dialog ref={dialog} className={`modal ${wide ? 'wide' : ''}`} aria-label={title} onCancel={event => { event.preventDefault(); if (!busy) onClose(); }} onClick={event => { if (event.target === dialog.current && !busy) onClose(); }}>
     <div className="modal-header"><h2>{title}</h2><IconButton label="닫기" onClick={() => { if (!busy) onClose(); }} disabled={busy}><X size={20}/></IconButton></div>
+    {feedback.error && <div className="modal-alert" role="alert"><CircleAlert size={16}/><span>{feedback.error}</span><IconButton className="tiny" label="안내 닫기" onClick={feedback.clear}><X size={15}/></IconButton></div>}
     {children}
   </dialog>;
 }

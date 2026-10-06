@@ -1,5 +1,5 @@
 import { build } from 'esbuild';
-import { mkdir, copyFile, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdir, copyFile, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 await rm('dist-server', { recursive:true, force:true });
 await mkdir('dist-server/data', { recursive:true });
@@ -11,4 +11,6 @@ await build({ entryPoints:['server/index.ts'], outfile:'dist-server/index.mjs', 
 for (const file of ['initial-state.json', 'materials.json']) { JSON.parse(await readFile(`data/${file}`, 'utf8')); await copyFile(`data/${file}`, `dist-server/data/${file}`); }
 // The API serves this shell for /invite/* so link previews can name the inviter.
 await copyFile('dist/index.html', 'dist-server/index.html');
+// Deploy scripts confirm the new code is live by comparing /api/health's version with this file.
+await writeFile('dist-server/RELEASE', release);
 console.log(`Lambda bundle ${release} + private data ready`);
