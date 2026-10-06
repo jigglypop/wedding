@@ -2,12 +2,10 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: Least-privilege role that lets GitHub Actions on the main branch publish the wedding planner app
 
 Parameters:
-  GitHubRepository:
-    Type: String
-    Default: jigglypop/wedding
-  GitHubBranch:
-    Type: String
-    Default: main
+  # GitHub issues subjects pinned to immutable owner/repository IDs (owner@id/repo@id); the name-only form is kept for older tokens.
+  AllowedSubjects:
+    Type: CommaDelimitedList
+    Default: 'repo:jigglypop@52653682/wedding@1407457525:ref:refs/heads/main,repo:jigglypop/wedding:ref:refs/heads/main'
   GitHubOidcProviderArn:
     Type: String
     Description: Existing IAM OIDC provider for token.actions.githubusercontent.com
@@ -35,7 +33,7 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubRepository}:ref:refs/heads/${GitHubBranch}'
+                token.actions.githubusercontent.com:sub: !Ref AllowedSubjects
       Policies:
         - PolicyName: PublishWeddingPlanner
           PolicyDocument:
