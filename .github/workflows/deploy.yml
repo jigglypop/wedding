@@ -43,7 +43,7 @@ jobs:
         run: |
           bucket="$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --query "Stacks[0].Outputs[?OutputKey=='MaterialsBucket'].OutputValue" --output text)"
           mkdir -p data
-          for file in initial-state.json materials.json; do
+          for file in initial-state.json materials.json venue-checklist.json; do
             aws s3 cp "s3://$bucket/build-data/$file" "data/$file" --only-show-errors
           done
 

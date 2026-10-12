@@ -94,7 +94,7 @@ if (-not $SkipBuild) {
 $webDirectory = Join-Path $workspace 'dist'
 $serverDirectory = Join-Path $workspace 'dist-server'
 $materialsDirectory = Join-Path $workspace 'data/assets'
-foreach ($required in @((Join-Path $webDirectory 'index.html'), (Join-Path $webDirectory 'og-image.png'), (Join-Path $serverDirectory 'index.mjs'), (Join-Path $serverDirectory 'index.html'), (Join-Path $serverDirectory 'RELEASE'), (Join-Path $serverDirectory 'data/initial-state.json'), (Join-Path $serverDirectory 'data/materials.json'))) {
+foreach ($required in @((Join-Path $webDirectory 'index.html'), (Join-Path $webDirectory 'og-image.png'), (Join-Path $serverDirectory 'index.mjs'), (Join-Path $serverDirectory 'index.html'), (Join-Path $serverDirectory 'RELEASE'), (Join-Path $serverDirectory 'data/initial-state.json'), (Join-Path $serverDirectory 'data/materials.json'), (Join-Path $serverDirectory 'data/venue-checklist.json'))) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Required build output missing: $required" }
 }
 if (-not (Test-Path -LiteralPath $materialsDirectory -PathType Container)) { throw 'Private materials are missing: data/assets.' }
@@ -178,7 +178,7 @@ try {
     Write-Host 'Publishing private source materials and website assets.'
     Invoke-Aws -Arguments @('s3', 'sync', $materialsDirectory, "s3://$($outputs['MaterialsBucket'])/", '--only-show-errors', '--sse', 'AES256') | Out-Null
     # The GitHub deploy workflow builds with these private files instead of keeping them in the public repository.
-    foreach ($dataFile in @('initial-state.json', 'materials.json')) {
+    foreach ($dataFile in @('initial-state.json', 'materials.json', 'venue-checklist.json')) {
         Invoke-Aws -Arguments @('s3', 'cp', (Join-Path $workspace "data/$dataFile"), "s3://$($outputs['MaterialsBucket'])/build-data/$dataFile", '--only-show-errors', '--sse', 'AES256') | Out-Null
     }
     # Hashed assets go up before the new Lambda starts serving invite pages that reference them; entry pages go last.

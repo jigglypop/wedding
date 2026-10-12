@@ -1,9 +1,10 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import type { Material, PlanState } from '../src/types';
+import { z } from 'zod';
+import type { Material, PlanState, Venue, VenueChecklist } from '../src/types';
 import { ConflictError, HttpError, deleteItem, getItem, localDir, putItem, queryItems, storageKind, type Item } from './db';
-import { ValidationError, validateState } from './model';
-import { starterState } from './starter';
+import { ValidationError, validateState, venueChecklistSchema } from './model';
+import { genericVenueChecklist, starterState } from './starter';
 
 export { HttpError } from './db';
 // The private Notion/Excel library may only be used by the original couple's workspace.
@@ -15,20 +16,45 @@ type MaterialItem = Item & { material:Material };
 export async function readData<T>(filename:string):Promise<T> { return JSON.parse(await readFile(resolve(dataDir(), filename), 'utf8')); }
 const conflict = () => new HttpError(409, '다른 화면에서 먼저 변경되었어요. 최신 내용을 불러온 뒤 다시 시도해 주세요.', 'conflict');
 
-async function legacyState():Promise<PlanState|null> {
-  if (storageKind === 'dynamodb') { const item = await getItem<StateItem>('PLAN', 'STATE'); return item ? validateState(JSON.parse(item.payload)) : null; }
-  try { return validateState(JSON.parse(await readFile(resolve(localDir(), 'state.json'), 'utf8'))); }
+type PrivateVenueChecklist = VenueChecklist & { venues:string[] };
+const privateChecklistSchema = venueChecklistSchema.and(z.object({ venues:z.array(z.string().min(1).max(300)).max(100) }));
+// Kept outside browser assets and returned only to the original workspace after authentication.
+export async function getVenueChecklist(workspace:string):Promise<VenueChecklist> {
+  if (workspace !== MAIN_WORKSPACE) return structuredClone(genericVenueChecklist);
+  const { venues:_venues, ...template } = privateChecklistSchema.parse(await readData<PrivateVenueChecklist>('venue-checklist.json'));
+  return template;
+}
+async function seededVenues(workspace:string):Promise<Venue[]> {
+  if (workspace !== MAIN_WORKSPACE) return [];
+  const template = privateChecklistSchema.parse(await readData<PrivateVenueChecklist>('venue-checklist.json'));
+  return template.venues.map((name, index) => ({ id:`excel-venue-${index + 1}`, name, status:'researching', visitDate:'', contact:'', url:'', notes:'', answers:{} }));
+}
+const hasVenues = (input:unknown) => !!input && typeof input === 'object' && Object.hasOwn(input, 'venues');
+async function initializeVenues(input:unknown, workspace:string):Promise<PlanState> {
+  return validateState(hasVenues(input) ? input : { ...input as object, venues:await seededVenues(workspace) });
+}
+async function legacyState():Promise<unknown|null> {
+  if (storageKind === 'dynamodb') { const item = await getItem<StateItem>('PLAN', 'STATE'); return item ? JSON.parse(item.payload) : null; }
+  try { return JSON.parse(await readFile(resolve(localDir(), 'state.json'), 'utf8')); }
   catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null; throw e; }
 }
 async function initialState(workspace:string) {
-  if (workspace === MAIN_WORKSPACE) { const legacy = await legacyState(); if (legacy) return legacy; }
-  const state = workspace === MAIN_WORKSPACE ? validateState(await readData<PlanState>('initial-state.json')) : starterState();
+  if (workspace === MAIN_WORKSPACE) { const legacy = await legacyState(); if (legacy) return initializeVenues(legacy, workspace); }
+  const state = workspace === MAIN_WORKSPACE ? await initializeVenues(await readData<PlanState>('initial-state.json'), workspace) : starterState();
   return { ...state, version:1, updatedAt:new Date().toISOString() };
 }
 
 export async function getState(workspace:string):Promise<PlanState> {
   const item = await getItem<StateItem>(`WS#${workspace}`, 'STATE');
-  if (item) return validateState(JSON.parse(item.payload));
+  if (item) {
+    const raw:unknown = JSON.parse(item.payload);
+    if (hasVenues(raw)) return validateState(raw);
+    // An old payload is migrated exactly once. A concurrent edit wins the condition and is re-read.
+    const migrated = validateState({ ...await initializeVenues(raw, workspace), version:item.version + 1, updatedAt:new Date().toISOString() });
+    try { await putItem({ ...item, payload:JSON.stringify(migrated), version:migrated.version }, { field:'version', equals:item.version }); }
+    catch (e) { if (e instanceof ConflictError) return getState(workspace); throw e; }
+    return migrated;
+  }
   const initial = await initialState(workspace);
   try { await putItem({ pk:`WS#${workspace}`, sk:'STATE', payload:JSON.stringify(initial), version:initial.version }, { absent:true }); }
   catch (e) { if (e instanceof ConflictError) return getState(workspace); throw e; }

@@ -6,8 +6,8 @@ import type { ChatMessage, Collection, Material, PlanState } from '../src/types'
 import { HttpError, bump, limit, mutateItem, peek, storageKind, type Item } from './db';
 import { hashPassword, randomToken, safeEqual, sessionCookie, sessionNeedsRefresh, sha256, verifyPassword } from './auth';
 import { acceptInviteAsUser, acceptInviteWithSignup, adminAction, adminUsername, createInvite, detachMember, ensureAdmin, ensureMembership, getUser, listUsers, nameSchema, oppositeSide, passwordSchema, pendingCount, publicUser, resolveInvite, revokeInvite, sessionUser, sideSchema, signUp, updateUser, usernameSchema, workspaceInfo, type UserRecord } from './accounts';
-import { MAIN_WORKSPACE, addMaterial, getMaterials, getState, mutateState, removeMaterial, saveState, uploadedMaterials } from './store';
-import { ValidationError, addActivity, applyProposals, collectionLabels, collections, itemLabel, itemSchemas, settingsSchema, validateState } from './model';
+import { MAIN_WORKSPACE, addMaterial, getMaterials, getState, getVenueChecklist, mutateState, removeMaterial, saveState, uploadedMaterials } from './store';
+import { ValidationError, addActivity, applyProposals, canonicalRecord, collectionLabels, collections, itemLabel, itemSchemas, settingsSchema, validateState } from './model';
 import { runAgent } from './agent';
 import { deleteUpload, matchesSignature, mimeByExtension, mimeOf, readLocalFile, remoteFiles, saveUpload, signedUrl } from './files';
 
@@ -22,8 +22,7 @@ const loginSchema = z.object({ username:z.string().trim().toLowerCase().max(100)
 const tooMany = '로그인 시도가 많아요. 15분 뒤 다시 시도해 주세요.';
 const notFound = () => new HttpError(404, '요청한 기능을 찾을 수 없어요.');
 const stale = () => new HttpError(409, '함께 쓰는 분이 먼저 바꾼 내용이 있어요. 최신 노트를 불러왔으니 확인 후 다시 시도해 주세요.', 'conflict');
-// Compares flat records regardless of key order.
-const canonical = (value:unknown) => JSON.stringify(value && typeof value === 'object' ? Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([, v]) => v !== undefined).sort(([a], [b]) => a.localeCompare(b))) : value ?? null);
+const canonical = canonicalRecord;
 
 function parseBody(event:Event):unknown {
   if (!event.body) return {};
@@ -165,8 +164,8 @@ export async function handler(event:Event):Promise<Result> {
     const refreshed = sessionNeedsRefresh(session) ? [sessionCookie(user)] : undefined;
 
     if (path === '/api/bootstrap' && method === 'GET') {
-      const [state, materials, workspace] = await Promise.all([getState(ws), getMaterials(ws), workspaceInfo(ws)]);
-      return json(200, { user:publicUser(user), workspace, state, materials:materials.map(materialSummary), agentReady:!!process.env.OPENAI_API_KEY, model:process.env.OPENAI_MODEL || 'gpt-6.1-sol', privateLibrary:ws === MAIN_WORKSPACE, ...(user.role === 'admin' ? { pendingUsers:await pendingCount() } : {}) }, refreshed);
+      const [state, materials, workspace, venueChecklist] = await Promise.all([getState(ws), getMaterials(ws), workspaceInfo(ws), getVenueChecklist(ws)]);
+      return json(200, { user:publicUser(user), workspace, state, materials:materials.map(materialSummary), venueChecklist, agentReady:!!process.env.OPENAI_API_KEY, model:process.env.OPENAI_MODEL || 'gpt-6.1-sol', privateLibrary:ws === MAIN_WORKSPACE, ...(user.role === 'admin' ? { pendingUsers:await pendingCount() } : {}) }, refreshed);
     }
     if (path === '/api/state' && method === 'GET') {
       const state = await getState(ws); const memberCount = meta.members.length;
@@ -178,7 +177,7 @@ export async function handler(event:Event):Promise<Result> {
       const current = await getState(ws);
       if (current.version !== version) throw new HttpError(409, '다른 화면에서 먼저 변경되었어요. 최신 내용을 불러온 뒤 다시 시도해 주세요.', 'conflict');
       let next:PlanState;
-      try { next = validateState({ ...incoming, version:current.version, updatedAt:current.updatedAt, activity:current.activity, conversations:current.conversations }); }
+      try { next = validateState({ ...incoming, venues:Object.hasOwn(incoming, 'venues') ? incoming.venues : current.venues, version:current.version, updatedAt:current.updatedAt, activity:current.activity, conversations:current.conversations }); }
       catch (e) { if (e instanceof z.ZodError) throw new HttpError(400, '백업 파일 형식이 올바르지 않아요. 이 앱에서 내보낸 JSON 파일인지 확인해 주세요.'); throw e; }
       addActivity(next, '백업 파일로 노트를 복원했어요', user.name);
       return json(200, { state:await saveState(ws, next, version) });
@@ -228,9 +227,9 @@ export async function handler(event:Event):Promise<Result> {
       if (ws === MAIN_WORKSPACE) await limit('chat-day:main', 100, 86400, dailyLimit);
       else { await limit(`chat-day:${ws}`, 30, 86400, dailyLimit); await limit('chat-day:others', 200, 86400, '오늘은 AI 상담 요청이 많아 잠시 쉬어요. 내일 다시 이용해 주세요.'); }
       return await withChatLock(ws, async () => {
-        const askedAt = new Date().toISOString(); const materials = await getMaterials(ws);
+        const askedAt = new Date().toISOString(); const [materials, venueChecklist] = await Promise.all([getMaterials(ws), getVenueChecklist(ws)]);
         let reply:ChatMessage;
-        try { reply = await runAgent(state, materials, message, user.name); }
+        try { reply = await runAgent(state, materials, message, user.name, venueChecklist); }
         catch (e) {
           if (e instanceof HttpError) throw e;
           const status = (e as { status?:number }).status;

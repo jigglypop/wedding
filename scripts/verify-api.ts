@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { readFile } from 'node:fs/promises';
 import { randomBytes, randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
-import type { PlanState } from '../src/types';
+import type { Bootstrap, PlanState, Venue, VenueChecklist } from '../src/types';
 
 // End-to-end check of a running API: npm run verify [-- --live] [-- --ai]
 const live = process.argv.includes('--live'); const ai = process.argv.includes('--ai');
@@ -28,15 +28,53 @@ class Client {
 const anonymous = new Client(); const owner = new Client(); const groom = new Client(); const bride = new Client();
 const suffix = randomBytes(3).toString('hex'); const groomName = `qa_g${suffix}`; const brideName = `qa_b${suffix}`; const password = `Qa${randomBytes(6).toString('hex')}9`;
 const marker = `검증 ${randomUUID()}`; let aiMessageId = '';
+const ownerVenueIds = new Set<string>(); const sharedVenueIds = new Set<string>(); let sharedSignedIn = false;
+const sourceVenueTemplate = JSON.parse(await readFile('data/venue-checklist.json', 'utf8')) as VenueChecklist & { venues:string[] };
+async function verifyVenuePair(writer:Client, reader:Client, template:VenueChecklist, tracked:Set<string>) {
+  const field = template.fields.find(f => f.kind === 'comparison'); const onsite = template.fields.find(f => f.kind === 'onsite');
+  assert.ok(field && onsite, 'Both comparison and onsite checklist fields must be available');
+  const make = (label:string, value:string, checked:boolean, rating:'만족'|'보통'|'아쉬움'):Venue => {
+    const id = randomUUID(); tracked.add(id);
+    return { id, name:`${marker} ${label}`, status:'researching', visitDate:'', contact:'', url:'', notes:'자동 검증 후 삭제', answers:{ [field.id]:{ value, checked, rating:'' }, [onsite.id]:{ value:`${label} 방문 메모`, checked:!checked, rating } } };
+  };
+  const first = make('홀 A', '250만원', true, '만족'); const second = make('홀 B', '350만원', false, '아쉬움');
+  await writer.json('/api/items', 'POST', { collection:'venues', item:first, expected:null });
+  await reader.json('/api/items', 'POST', { collection:'venues', item:second, expected:null });
+  const initial:PlanState = (await reader.json('/api/bootstrap')).state;
+  assert.deepEqual(initial.venues.find(v => v.id === first.id), first);
+  assert.deepEqual(initial.venues.find(v => v.id === second.id), second);
+  const edited:Venue = { ...first, visitDate:'2027-01-15', answers:{ ...first.answers, [field.id]:{ value:'240만원', checked:false, rating:'' }, [onsite.id]:{ value:'홀 A 수정 메모', checked:true, rating:'보통' } } };
+  await reader.json('/api/items', 'POST', { collection:'venues', item:edited, expected:first });
+  const stale = await writer.json('/api/items', 'POST', { collection:'venues', item:{ ...first, notes:'이전 화면' }, expected:first }, 409);
+  assert.equal(stale.code, 'conflict');
+  await writer.raw('/api/items/delete', 'POST', { collection:'venues', id:first.id, expected:first }, 409);
+  // Reload using a separate request to the persistent API, rather than the write response.
+  const reloaded:PlanState = (await writer.json('/api/bootstrap')).state;
+  assert.deepEqual(reloaded.venues.find(v => v.id === first.id), edited);
+  assert.deepEqual(reloaded.venues.find(v => v.id === second.id), second);
+  const removed:PlanState = (await reader.json('/api/items/delete', 'POST', { collection:'venues', id:second.id, expected:second })).state;
+  assert.equal(removed.venues.some(v => v.id === second.id), false);
+  assert.deepEqual(removed.venues.find(v => v.id === first.id), edited);
+}
+async function cleanupVenues(client:Client, ids:Set<string>) {
+  if (!ids.size) return;
+  const state:PlanState = (await client.json('/api/bootstrap')).state;
+  for (const venue of state.venues.filter(v => ids.has(v.id))) await client.json('/api/items/delete', 'POST', { collection:'venues', id:venue.id, expected:venue });
+}
 await anonymous.json('/api/health');
 await anonymous.raw('/api/bootstrap', 'GET', undefined, 401);
 await anonymous.raw('/api/login', 'POST', { username:admin.username, password:'wrong-password-1' }, 401);
 await owner.json('/api/login', 'POST', admin);
-const boot = await owner.json('/api/bootstrap');
+const boot = await owner.json<Bootstrap>('/api/bootstrap');
 assert.equal(boot.user.role, 'admin'); assert.equal(boot.privateLibrary, true);
 assert.ok(boot.materials.length >= 20); assert.ok(boot.state.tasks.length >= 40);
+assert.equal(boot.venueChecklist.fields.length, 69);
+assert.deepEqual(boot.venueChecklist.fields, sourceVenueTemplate.fields);
+assert.equal(boot.venueChecklist.sourceName, sourceVenueTemplate.sourceName);
+assert.equal(sourceVenueTemplate.venues.length, 10);
 try {
-  const image = boot.materials.find((m:{ kind:string; thumbnail?:string }) => m.kind === 'image' && m.thumbnail);
+  await verifyVenuePair(owner, owner, boot.venueChecklist, ownerVenueIds);
+  const image = boot.materials.find(m => m.kind === 'image' && m.thumbnail);
   if (image) {
     const response = await owner.raw(`/api/materials/${image.id}?thumb=1`, 'GET', undefined, live ? 302 : 200, live ? 'manual' : 'follow');
     if (live) { const file = await fetch(response.headers.get('location')!); assert.equal(file.status, 200); assert.equal(file.headers.get('content-type'), 'image/webp'); checks++; }
@@ -50,8 +88,13 @@ try {
   assert.equal((await anonymous.json('/api/login', 'POST', { username:groomName, password }, 403)).code, 'pending');
   await owner.json('/api/admin/users/action', 'POST', { username:groomName, action:'approve' });
   await groom.json('/api/login', 'POST', { username:groomName, password });
+  sharedSignedIn = true;
   const groomBoot = await groom.json('/api/bootstrap');
   assert.equal(groomBoot.privateLibrary, false); assert.equal(groomBoot.materials.length, 0); assert.ok(groomBoot.state.tasks.length >= 25);
+  assert.deepEqual(groomBoot.state.venues, []);
+  assert.equal(groomBoot.venueChecklist.sourceName, undefined);
+  assert.ok(!JSON.stringify(groomBoot).includes(sourceVenueTemplate.sourceName!));
+  assert.ok(groomBoot.venueChecklist.fields.length > 0 && groomBoot.venueChecklist.fields.length < 69);
   await groom.raw('/api/admin/users', 'GET', undefined, 403);
 
   const code:string = (await groom.json('/api/invite', 'POST', {})).workspace.invite.code;
@@ -64,6 +107,7 @@ try {
   const shared = await groom.json(`/api/state?since=${groomBoot.state.version}`);
   assert.ok(shared.state.tasks.some((t:{ title:string }) => t.title === marker)); assert.equal(shared.state.activity[0].by, '검증 신부');
   assert.equal((await groom.json('/api/workspace')).workspace.members.length, 2);
+  await verifyVenuePair(groom, bride, groomBoot.venueChecklist, sharedVenueIds);
 
   if (ai) {
     const requestId = randomUUID();
@@ -77,13 +121,18 @@ try {
     assert.ok(state.tasks.some(t => t.title === marker));
   }
 } finally {
+  await cleanupVenues(owner, ownerVenueIds);
+  if (sharedSignedIn) await cleanupVenues(groom, sharedVenueIds);
   const latest:PlanState = (await owner.json('/api/bootstrap')).state;
   for (const note of latest.notes.filter(n => n.title === marker)) await owner.json('/api/items/delete', 'POST', { collection:'notes', id:note.id });
   for (const task of latest.tasks.filter(t => t.title === marker)) await owner.json('/api/items/delete', 'POST', { collection:'tasks', id:task.id });
   if (aiMessageId) await owner.json('/api/chat/remove', 'POST', { messageId:aiMessageId });
   const users = (await owner.json('/api/admin/users')).users as { username:string }[];
   for (const username of [brideName, groomName]) if (users.some(u => u.username === username)) await owner.json('/api/admin/users/action', 'POST', { username, action:'delete' });
+  const afterCleanup:PlanState = (await owner.json('/api/bootstrap')).state;
+  assert.deepEqual(afterCleanup.venues, boot.state.venues, 'Verification must preserve every pre-existing venue');
+  assert.deepEqual(afterCleanup.tasks, boot.state.tasks, 'Verification must preserve existing checklist records');
 }
 await owner.json('/api/logout', 'POST', {});
 await owner.raw('/api/bootstrap', 'GET', undefined, 401);
-console.log(JSON.stringify({ ok:true, base, checks, ai, sourceCount:boot.materials.length, taskCount:boot.state.tasks.length, storage:live ? 'dynamodb' : 'local' }));
+console.log(JSON.stringify({ ok:true, base, checks, ai, sourceCount:boot.materials.length, taskCount:boot.state.tasks.length, venueCount:boot.state.venues.length, venueFieldCount:boot.venueChecklist.fields.length, storage:live ? 'dynamodb' : 'local' }));

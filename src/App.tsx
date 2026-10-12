@@ -12,6 +12,7 @@ import { listViews } from './views/Lists';
 import { Materials } from './views/Materials';
 import { SettingsView } from './views/SettingsView';
 import { Admin } from './views/Admin';
+import { VenueEditor } from './views/Venues';
 
 export default function App() {
   const [session, setSession] = useState<{ checked:boolean; user:SessionUser|null }>({ checked:false, user:null });
@@ -160,13 +161,16 @@ function Shell({ data, setData, onSignedOut }:{ data:Bootstrap; setData:(update:
       <nav className="tabbar glass" aria-label="빠른 메뉴">{mobileTabs.map(id => { const item = navigation.find(n => n.id === id)!; const Icon = item.icon; return <button type="button" key={id} className={current === id ? 'active' : ''} onClick={() => navigate(id)} aria-current={current === id ? 'page' : undefined}><Icon size={21}/><span>{item.short}</span></button>; })}<button type="button" className={drawer || !mobileTabs.includes(current) ? 'active' : ''} onClick={() => setDrawer(true)}><Ellipsis size={21}/><span>전체</span></button></nav>
     </div>
     {toast && <Toast message={toast}/>}
-    {editor && <ItemEditor key={`${editor.collection}-${editor.item?.id || 'new'}`} editor={editor} current={editor.item ? shown(editor.collection, editor.item.id) : null} busy={blocked} onClose={() => setEditor(null)} onSave={async item => { if (await saveItem(editor.collection, item, editor.item ? '수정했어요.' : `${josa(collectionName[editor.collection], '을/를')} 추가했어요.`)) setEditor(null); }}/>}
+    {editor && (editor.collection === 'venues'
+      ? <VenueEditor key={editor.item?.id || 'new'} item={editor.item} current={editor.item ? shown(editor.collection, editor.item.id) : null} busy={blocked} onClose={() => setEditor(null)} onSave={async item => { if (await saveItem('venues', item)) setEditor(null); }}/>
+      : <ItemEditor key={`${editor.collection}-${editor.item?.id || 'new'}`} editor={editor} current={editor.item ? shown(editor.collection, editor.item.id) : null} busy={blocked} onClose={() => setEditor(null)} onSave={async item => { if (await saveItem(editor.collection, item, editor.item ? '수정했어요.' : `${josa(collectionName[editor.collection], '을/를')} 추가했어요.`)) setEditor(null); }}/>)}
     {removal && <Modal title={`${collectionName[removal.collection]} 삭제`} onClose={() => setRemoval(null)} busy={blocked}><div className="confirm-body"><p>‘{'title' in removal.item ? removal.item.title : removal.item.name}’ 항목을 삭제할까요?</p><span>함께 쓰는 분의 노트에서도 삭제돼요.</span></div><div className="modal-actions"><Button kind="secondary" disabled={blocked} onClick={() => setRemoval(null)}>취소</Button><Button kind="danger" busy={blocked} onClick={async () => { if (await removeItem(removal.collection, removal.item)) setRemoval(null); }}><Trash2 size={15}/>삭제하기</Button></div></Modal>}
   </FeedbackContext.Provider></PlannerContext.Provider>;
 }
 
 type Field = { name:string; label:string; type?:'text'|'number'|'date'|'time'|'url'|'tel'|'select'|'textarea'; options?:[string, string][]; required?:boolean; placeholder?:string; wide?:boolean; max?:number; min?:number; maxLength?:number };
 const fields:Record<Collection, Field[]> = {
+  venues:[],
   tasks:[{ name:'title', label:'할 일', required:true, wide:true, placeholder:'예: 웨딩홀 방문 상담 예약', maxLength:300 }, { name:'category', label:'분류', placeholder:'예: 웨딩홀', maxLength:100 }, { name:'dueDate', label:'마감일', type:'date' }, { name:'status', label:'진행 상태', type:'select', options:Object.entries(taskStatus) }, { name:'notes', label:'메모', type:'textarea', wide:true, maxLength:2000 }],
   budgets:[{ name:'title', label:'항목', required:true, wide:true, placeholder:'예: 스튜디오 촬영', maxLength:300 }, { name:'category', label:'분류', placeholder:'예: 스드메', maxLength:100 }, { name:'planned', label:'예정 금액 (원)', type:'number' }, { name:'actual', label:'확정 금액 (원)', type:'number' }, { name:'paid', label:'지급 금액 (원)', type:'number' }, { name:'notes', label:'메모', type:'textarea', wide:true, maxLength:2000 }],
   vendors:[{ name:'name', label:'업체명', required:true, wide:true, maxLength:300 }, { name:'category', label:'분류', placeholder:'예: 웨딩홀', maxLength:100 }, { name:'status', label:'상담 · 계약 상태', type:'select', options:Object.entries(vendorStatus) }, { name:'price', label:'견적 금액 (원)', type:'number' }, { name:'contact', label:'연락처', type:'tel', maxLength:300 }, { name:'url', label:'홈페이지 주소', type:'url', wide:true, placeholder:'https://', maxLength:2000 }, { name:'notes', label:'장점, 조건, 상담 메모', type:'textarea', wide:true, maxLength:2000 }],
@@ -174,7 +178,7 @@ const fields:Record<Collection, Field[]> = {
   timeline:[{ name:'time', label:'시간', type:'time', required:true }, { name:'title', label:'진행 내용', required:true, maxLength:300 }, { name:'owner', label:'담당자', wide:true, maxLength:100 }, { name:'notes', label:'전달할 사항', type:'textarea', wide:true, maxLength:2000 }],
   notes:[{ name:'title', label:'제목', required:true, wide:true, maxLength:300 }, { name:'category', label:'분류', wide:true, maxLength:100 }, { name:'content', label:'내용', type:'textarea', wide:true, required:true, maxLength:10000 }]
 };
-const defaults:Record<Collection, Record<string, unknown>> = { tasks:{ title:'', category:'', dueDate:'', status:'todo', notes:'' }, budgets:{ title:'', category:'', planned:0, actual:0, paid:0, notes:'' }, vendors:{ name:'', category:'', status:'researching', price:0, contact:'', url:'', notes:'' }, guests:{ name:'', side:'other', group:'', people:1, rsvp:'pending', table:'', contact:'', notes:'' }, timeline:{ time:'', title:'', owner:'', notes:'' }, notes:{ title:'', content:'', category:'' } };
+const defaults:Record<Collection, Record<string, unknown>> = { venues:{}, tasks:{ title:'', category:'', dueDate:'', status:'todo', notes:'' }, budgets:{ title:'', category:'', planned:0, actual:0, paid:0, notes:'' }, vendors:{ name:'', category:'', status:'researching', price:0, contact:'', url:'', notes:'' }, guests:{ name:'', side:'other', group:'', people:1, rsvp:'pending', table:'', contact:'', notes:'' }, timeline:{ time:'', title:'', owner:'', notes:'' }, notes:{ title:'', content:'', category:'' } };
 
 function ItemEditor({ editor, current, onClose, onSave, busy }:{ editor:Editor; current:Item|null; onClose:() => void; onSave:(item:Item) => Promise<void>; busy:boolean }) {
   const [form, setForm] = useState(() => { const initial:Record<string, unknown> = { ...defaults[editor.collection], ...editor.item }; return { base:initial, values:initial }; });

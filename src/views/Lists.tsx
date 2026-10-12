@@ -4,6 +4,7 @@ import { collectionName, guestSides, rsvpLabels, taskStatus, usePlanner, vendorS
 import { compactMoney, csv, dateLabel, fullDate, josa, money, safeUrl, sortTime, today } from '../lib/format';
 import type { Budget, Collection, Guest, Note, Task, TimelineItem, Vendor } from '../types';
 import { Badge, Button, Empty, IconButton, useIsMobile } from '../components/ui';
+import { Venues } from './Venues';
 
 type Filters = { search:string; category:string; status:string };
 function useFilters() { const [filters, setFilters] = useState<Filters>({ search:'', category:'all', status:'all' }); return { filters, set:(patch:Partial<Filters>) => setFilters(current => ({ ...current, ...patch })) }; }
@@ -157,4 +158,4 @@ export function Notes() {
   </>;
 }
 
-export const listViews = { tasks:Tasks, budgets:Budgets, vendors:Vendors, guests:Guests, timeline:Timeline, notes:Notes };
+export const listViews = { tasks:Tasks, venues:Venues, budgets:Budgets, vendors:Vendors, guests:Guests, timeline:Timeline, notes:Notes };

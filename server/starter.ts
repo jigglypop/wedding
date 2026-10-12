@@ -1,4 +1,16 @@
-import type { PlanState } from '../src/types';
+import type { PlanState, VenueChecklist } from '../src/types';
+
+// Independently authored basic questions for couples without the private Excel library.
+export const genericVenueChecklist:VenueChecklist = { title:'웨딩홀 체크리스트', fields:[
+  { id:'location', category:'기본 정보', label:'위치와 교통', kind:'comparison' },
+  { id:'capacity', category:'기본 정보', label:'수용 인원', kind:'comparison' },
+  { id:'rental', category:'비용', label:'대관료', kind:'comparison' },
+  { id:'meal', category:'비용', label:'식대와 보증 인원', kind:'comparison' },
+  { id:'parking', category:'방문 확인', label:'주차', question:'하객이 주차하고 홀까지 편하게 이동할 수 있나요?', kind:'onsite' },
+  { id:'hall', category:'방문 확인', label:'홀과 동선', question:'좌석, 시야, 입장 동선을 직접 확인했나요?', kind:'onsite' },
+  { id:'food', category:'방문 확인', label:'식사', question:'식사 공간과 메뉴를 확인했나요?', kind:'onsite' },
+  { id:'terms', category:'계약 확인', label:'추가 비용과 취소 조건', question:'포함 사항, 추가 비용, 취소 조건을 확인했나요?', kind:'onsite' }
+] };
 
 // Generic starter plan for newly approved couples. Written for this app; it does not reuse the private Notion guides.
 const tasks:[string, string, number][] = [
@@ -25,6 +37,6 @@ export function starterState():PlanState {
     version:1, updatedAt:now, settings:{ coupleNames:'', weddingDate:'', venue:'', totalBudget:0, guestTarget:0 },
     tasks:tasks.map(([title, category, day], index) => ({ id:`starter-task-${index + 1}`, title, category, dueDate:'', status:'todo' as const, notes:`권장 시기: 예식일 기준 D${day < 0 ? '-' : '+'}${Math.abs(day)}. 실제 계약·촬영 일정이 정해지면 그 날짜를 우선해 주세요.` })),
     budgets:budgets.map(([title, category], index) => ({ id:`starter-budget-${index + 1}`, title, category, planned:0, actual:0, paid:0, notes:'' })),
-    vendors:[], guests:[], timeline:[], notes:[], activity:[], conversations:[]
+    vendors:[], venues:[], guests:[], timeline:[], notes:[], activity:[], conversations:[]
   };
 }

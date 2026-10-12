@@ -8,22 +8,29 @@ const id = z.string().min(1).max(100);
 const money = z.number().finite().min(0).max(1e12);
 const date = z.string().refine(v => v === '' || (/^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(Date.parse(v)) && new Date(v).toISOString().slice(0, 10) === v), '날짜 형식을 확인해 주세요.');
 const source = { sourceId:str(100).optional() };
+export const venueFieldId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/);
+export const venueAnswerSchema = z.object({ value:str(), checked:z.boolean(), rating:z.enum(['', '만족', '보통', '아쉬움']) });
+export const venueChecklistSchema = z.object({
+  title:str(300).min(1), sourceName:str(300).optional(),
+  fields:z.array(z.object({ id:venueFieldId, category:str(100), label:str(300).min(1), question:str(2000).optional(), kind:z.enum(['comparison', 'onsite']) })).max(120)
+}).refine(template => new Set(template.fields.map(field => field.id)).size === template.fields.length, '체크리스트 항목 ID가 중복됩니다.');
 export const settingsSchema = z.object({ coupleNames:str(100), weddingDate:date, venue:str(300), totalBudget:money, guestTarget:z.number().int().min(0).max(10000) });
 export const itemSchemas = {
   tasks:z.object({ id, title:str(300).min(1), category:str(100), dueDate:date, status:z.enum(['todo', 'doing', 'done']), notes:str(), ...source }),
   budgets:z.object({ id, title:str(300).min(1), category:str(100), planned:money, actual:money, paid:money, notes:str(), ...source }),
   vendors:z.object({ id, name:str(300).min(1), category:str(100), status:z.enum(['researching', 'contacted', 'booked']), price:money, contact:str(300), url:str(2000).refine(v => !v || /^https?:\/\//i.test(v), 'http(s) 주소를 입력해 주세요.'), notes:str(), ...source }),
+  venues:z.object({ id, name:str(300).min(1), status:z.enum(['researching', 'contacted', 'booked']), visitDate:date, contact:str(300), url:str(2000).refine(v => !v || /^https?:\/\//i.test(v), 'http(s) 주소를 입력해 주세요.'), notes:str(), answers:z.record(venueFieldId, venueAnswerSchema).refine(answers => Object.keys(answers).length <= 120, '웨딩홀 체크리스트는 120개 항목까지 기록할 수 있어요.') }),
   guests:z.object({ id, name:str(100).min(1), side:z.enum(['bride', 'groom', 'other']), group:str(100), people:z.number().int().min(1).max(100), rsvp:z.enum(['pending', 'yes', 'no']), table:str(100), contact:str(300), notes:str() }),
   timeline:z.object({ id, time:str(20), title:str(300).min(1), owner:str(100), notes:str() }),
   notes:z.object({ id, title:str(300).min(1), content:str(10000), category:str(100) })
 };
 export const collections = Object.keys(itemSchemas) as Collection[];
-export const collectionLabels:Record<Collection, string> = { tasks:'할 일', budgets:'예산', vendors:'업체', guests:'하객', timeline:'타임라인', notes:'메모' };
+export const collectionLabels:Record<Collection, string> = { tasks:'할 일', budgets:'예산', vendors:'업체', venues:'웨딩홀', guests:'하객', timeline:'타임라인', notes:'메모' };
 export const proposalSchema = z.object({ id, type:z.enum(['upsert', 'delete', 'settings']), collection:z.enum(collections as [Collection, ...Collection[]]).optional(), item:z.record(z.string(), z.unknown()).optional(), itemId:str(100).optional(), settings:settingsSchema.partial().optional(), expectedItem:z.record(z.string(), z.unknown()).nullable().optional(), expectedSettings:settingsSchema.partial().optional(), description:str(300) });
 export const messageSchema = z.object({ id, role:z.enum(['user', 'assistant']), content:str(16000), at:str(100), by:str(40).optional(), proposals:z.array(proposalSchema).max(60).optional(), applied:z.boolean().optional(), sources:z.array(z.object({ id, title:str(500), sourceUrl:str(2000).optional() })).max(40).optional() });
 export const stateSchema = z.object({
   version:z.number().int().positive(), updatedAt:str(100), settings:settingsSchema,
-  tasks:z.array(itemSchemas.tasks).max(600), budgets:z.array(itemSchemas.budgets).max(300), vendors:z.array(itemSchemas.vendors).max(200), guests:z.array(itemSchemas.guests).max(2000), timeline:z.array(itemSchemas.timeline).max(200), notes:z.array(itemSchemas.notes).max(200),
+  tasks:z.array(itemSchemas.tasks).max(600), budgets:z.array(itemSchemas.budgets).max(300), vendors:z.array(itemSchemas.vendors).max(200), venues:z.array(itemSchemas.venues).max(100).default([]), guests:z.array(itemSchemas.guests).max(2000), timeline:z.array(itemSchemas.timeline).max(200), notes:z.array(itemSchemas.notes).max(200),
   activity:z.array(z.object({ id, at:str(100), text:str(500), by:str(40).optional() })).max(100), conversations:z.array(messageSchema).max(40)
 });
 
@@ -38,6 +45,11 @@ export function addActivity(state:PlanState, text:string, by?:string) {
   state.activity = state.activity.slice(0, 60);
 }
 export function itemLabel(item:Record<string, unknown>) { return String(item.title ?? item.name ?? '').slice(0, 60); }
+// Nested venue answers are compared without depending on JSON object key order.
+export function canonicalRecord(value:unknown):string {
+  const sorted = (input:unknown):unknown => Array.isArray(input) ? input.map(sorted) : input && typeof input === 'object' ? Object.fromEntries(Object.entries(input).filter(([, v]) => v !== undefined).sort(([a], [b]) => a.localeCompare(b)).map(([key, v]) => [key, sorted(v)])) : input;
+  return JSON.stringify(sorted(value ?? null));
+}
 
 export function applyProposals(state:PlanState, proposals:Proposal[], by?:string):PlanState {
   const next = structuredClone(state);
@@ -53,7 +65,7 @@ export function applyProposals(state:PlanState, proposals:Proposal[], by?:string
     const targetId = proposal.type === 'delete' ? proposal.itemId : proposal.item?.id;
     if (proposal.expectedItem !== undefined) {
       const existing = items.find(i => i.id === targetId) || null;
-      if (JSON.stringify(existing) !== JSON.stringify(proposal.expectedItem)) throw new ValidationError('항목이 그사이 변경되었어요. 변경안을 다시 요청해 주세요.');
+      if (canonicalRecord(existing) !== canonicalRecord(proposal.expectedItem)) throw new ValidationError('항목이 그사이 변경되었어요. 변경안을 다시 요청해 주세요.');
     }
     if (proposal.type === 'delete') {
       const index = items.findIndex(i => i.id === proposal.itemId);
