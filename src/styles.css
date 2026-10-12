@@ -497,6 +497,21 @@ td.strong { font-weight: 750; }
 .venue-question { font-size: 13px; color: var(--ink-3); line-height: 1.6; margin-bottom: 10px; }
 .venue-rating { margin-bottom: 10px; max-width: 180px; }
 .venue-save { position: sticky; bottom: 0; background: rgba(255, 255, 255, .94); z-index: 1; }
+.venue-hall-names { margin: -5px 0 14px; color: var(--ink-3); font-size: 13px; overflow-wrap: anywhere; }
+.venue-scope-heading { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; margin: 0 0 12px; }
+.venue-scope-heading h3 { font-size: 15px; }
+.venue-scope-heading span { font-size: 12px; color: var(--ink-3); }
+.venue-hall-panel { padding: 16px; border: 1px solid rgba(91, 140, 124, .25); border-radius: 16px; background: rgba(242, 249, 246, .6); }
+.venue-hall-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding-bottom: 12px; }
+.venue-hall-tabs { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.venue-hall-tabs button { max-width: 240px; padding: 8px 13px; border: 1px solid rgba(91, 140, 124, .2); border-radius: 12px; color: var(--ink-2); background: rgba(255, 255, 255, .65); font-size: 13px; overflow-wrap: anywhere; }
+.venue-hall-tabs button.active { color: #fff; background: #35695b; border-color: #35695b; }
+.venue-hall-name { display: flex; align-items: flex-end; gap: 8px; margin-bottom: 12px; }
+.venue-hall-name .field { flex: 1; min-width: 0; }
+.venue-hall-name > .icon-button { margin-bottom: 5px; }
+.venue-hall-removal { padding: 12px; margin: 10px 0; border: 1px solid var(--line); border-radius: 12px; background: #fff; font-size: 13px; }
+.venue-hall-removal .button-row { margin-top: 10px; }
+.venue-common-panel { margin-top: 24px; }
 @media (max-width: 760px) { .venue-checklist { padding: 0 20px 18px; } }
 .note-tile .tile-top { margin-bottom: 8px; }
 .note-tile p { margin-top: 8px; font-size: 14.5px; line-height: 1.75; color: var(--ink-2); white-space: pre-wrap; display: -webkit-box; -webkit-line-clamp: 8; -webkit-box-orient: vertical; overflow: hidden; }

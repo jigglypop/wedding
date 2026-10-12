@@ -4,8 +4,9 @@ export interface Task { id:string;title:string;category:string;dueDate:string;st
 export interface Budget { id:string;title:string;category:string;planned:number;actual:number;paid:number;notes:string;sourceId?:string }
 export interface Vendor { id:string;name:string;category:string;status:'researching'|'contacted'|'booked';price:number;contact:string;url:string;notes:string;sourceId?:string }
 export interface VenueAnswer { value:string;checked:boolean;rating:''|'만족'|'보통'|'아쉬움' }
-export interface Venue { id:string;name:string;status:'researching'|'contacted'|'booked';visitDate:string;contact:string;url:string;notes:string;answers:Record<string,VenueAnswer> }
-export interface VenueChecklistField { id:string;category:string;label:string;question?:string;kind:'comparison'|'onsite' }
+export interface VenueHall { id:string;name:string;answers:Record<string,VenueAnswer> }
+export interface Venue { id:string;name:string;status:'researching'|'contacted'|'booked';visitDate:string;contact:string;url:string;notes:string;answers:Record<string,VenueAnswer>;halls:VenueHall[] }
+export interface VenueChecklistField { id:string;category:string;label:string;question?:string;kind:'comparison'|'onsite';scope?:'hall'|'venue' }
 export interface VenueChecklist { title:string;sourceName?:string;fields:VenueChecklistField[] }
 export interface Guest { id:string;name:string;side:'bride'|'groom'|'other';group:string;people:number;rsvp:'pending'|'yes'|'no';table:string;contact:string;notes:string }
 export interface TimelineItem { id:string;time:string;title:string;owner:string;notes:string }

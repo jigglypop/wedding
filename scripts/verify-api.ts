@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { randomBytes, randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 import type { Bootstrap, PlanState, Venue, VenueChecklist } from '../src/types';
+import { scopeVenueChecklist } from '../src/lib/venue-checklist';
 
 // End-to-end check of a running API: npm run verify [-- --live] [-- --ai]
 const live = process.argv.includes('--live'); const ai = process.argv.includes('--ai');
@@ -31,19 +32,20 @@ const marker = `검증 ${randomUUID()}`; let aiMessageId = '';
 const ownerVenueIds = new Set<string>(); const sharedVenueIds = new Set<string>(); let sharedSignedIn = false;
 const sourceVenueTemplate = JSON.parse(await readFile('data/venue-checklist.json', 'utf8')) as VenueChecklist & { venues:string[] };
 async function verifyVenuePair(writer:Client, reader:Client, template:VenueChecklist, tracked:Set<string>) {
-  const field = template.fields.find(f => f.kind === 'comparison'); const onsite = template.fields.find(f => f.kind === 'onsite');
-  assert.ok(field && onsite, 'Both comparison and onsite checklist fields must be available');
+  const field = template.fields.find(f => f.kind === 'comparison' && f.scope === 'hall'); const onsite = template.fields.find(f => f.kind === 'onsite' && f.scope === 'hall'); const common = template.fields.find(f => f.scope === 'venue');
+  assert.ok(field && onsite && common, 'Hall-specific and common checklist fields must be available');
   const make = (label:string, value:string, checked:boolean, rating:'만족'|'보통'|'아쉬움'):Venue => {
     const id = randomUUID(); tracked.add(id);
-    return { id, name:`${marker} ${label}`, status:'researching', visitDate:'', contact:'', url:'', notes:'자동 검증 후 삭제', answers:{ [field.id]:{ value, checked, rating:'' }, [onsite.id]:{ value:`${label} 방문 메모`, checked:!checked, rating } } };
+    return { id, name:`${marker} ${label}`, status:'researching', visitDate:'', contact:'', url:'', notes:'자동 검증 후 삭제', answers:{ [common.id]:{ value:'웨딩홀 공통 기록', checked:true, rating:'' } }, halls:[{ id:randomUUID(), name:'그랜드홀', answers:{ [field.id]:{ value, checked, rating:'' }, [onsite.id]:{ value:`${label} 방문 메모`, checked:!checked, rating } } }] };
   };
-  const first = make('홀 A', '250만원', true, '만족'); const second = make('홀 B', '350만원', false, '아쉬움');
+  const first = make('웨딩홀 A', '250만원', true, '만족'); const second = make('웨딩홀 B', '350만원', false, '아쉬움');
+  first.halls.push({ id:randomUUID(), name:'루미에르홀', answers:{ [field.id]:{ value:'400만원', checked:false, rating:'' }, [onsite.id]:{ value:'별도의 홀 방문 메모', checked:true, rating:'아쉬움' } } });
   await writer.json('/api/items', 'POST', { collection:'venues', item:first, expected:null });
   await reader.json('/api/items', 'POST', { collection:'venues', item:second, expected:null });
   const initial:PlanState = (await reader.json('/api/bootstrap')).state;
   assert.deepEqual(initial.venues.find(v => v.id === first.id), first);
   assert.deepEqual(initial.venues.find(v => v.id === second.id), second);
-  const edited:Venue = { ...first, visitDate:'2027-01-15', answers:{ ...first.answers, [field.id]:{ value:'240만원', checked:false, rating:'' }, [onsite.id]:{ value:'홀 A 수정 메모', checked:true, rating:'보통' } } };
+  const edited:Venue = { ...first, visitDate:'2027-01-15', halls:[{ ...first.halls[0], answers:{ [field.id]:{ value:'240만원', checked:false, rating:'' }, [onsite.id]:{ value:'홀 A 수정 메모', checked:true, rating:'보통' } } }, first.halls[1]] };
   await reader.json('/api/items', 'POST', { collection:'venues', item:edited, expected:first });
   const stale = await writer.json('/api/items', 'POST', { collection:'venues', item:{ ...first, notes:'이전 화면' }, expected:first }, 409);
   assert.equal(stale.code, 'conflict');
@@ -52,9 +54,22 @@ async function verifyVenuePair(writer:Client, reader:Client, template:VenueCheck
   const reloaded:PlanState = (await writer.json('/api/bootstrap')).state;
   assert.deepEqual(reloaded.venues.find(v => v.id === first.id), edited);
   assert.deepEqual(reloaded.venues.find(v => v.id === second.id), second);
+  assert.deepEqual(edited.halls[1], first.halls[1]); assert.deepEqual(edited.answers, first.answers);
+  const sharedEdit:Venue = { ...edited, answers:{ ...edited.answers, [common.id]:{ value:'파트너가 수정한 공통 기록', checked:false, rating:'보통' } }, halls:[edited.halls[0], { ...edited.halls[1], name:'루미에르홀 2층', answers:{ ...edited.halls[1].answers, [field.id]:{ value:'390만원', checked:true, rating:'' } } }] };
+  await reader.json('/api/items', 'POST', { collection:'venues', item:sharedEdit, expected:edited });
+  await writer.raw('/api/items', 'POST', { collection:'venues', item:edited, expected:edited }, 409);
+  const { halls:_halls, ...flat } = first;
+  const flatLegacy = { ...flat, answers:{ ...first.answers, ...first.halls[0].answers } };
+  await writer.raw('/api/items', 'POST', { collection:'venues', item:flatLegacy, expected:flatLegacy }, 409);
+  await writer.raw('/api/items', 'POST', { collection:'venues', item:flatLegacy, expected:sharedEdit }, 409);
+  await writer.raw('/api/items', 'POST', { collection:'venues', item:{ ...sharedEdit, halls:[sharedEdit.halls[0], sharedEdit.halls[0]] }, expected:sharedEdit }, 400);
+  const afterShared:PlanState = (await writer.json('/api/bootstrap')).state;
+  assert.deepEqual(afterShared.venues.find(v => v.id === first.id), sharedEdit);
+  const oneHall:Venue = { ...sharedEdit, halls:[sharedEdit.halls[0]] };
+  await reader.json('/api/items', 'POST', { collection:'venues', item:oneHall, expected:sharedEdit });
   const removed:PlanState = (await reader.json('/api/items/delete', 'POST', { collection:'venues', id:second.id, expected:second })).state;
   assert.equal(removed.venues.some(v => v.id === second.id), false);
-  assert.deepEqual(removed.venues.find(v => v.id === first.id), edited);
+  assert.deepEqual(removed.venues.find(v => v.id === first.id), oneHall);
 }
 async function cleanupVenues(client:Client, ids:Set<string>) {
   if (!ids.size) return;
@@ -69,7 +84,7 @@ const boot = await owner.json<Bootstrap>('/api/bootstrap');
 assert.equal(boot.user.role, 'admin'); assert.equal(boot.privateLibrary, true);
 assert.ok(boot.materials.length >= 20); assert.ok(boot.state.tasks.length >= 40);
 assert.equal(boot.venueChecklist.fields.length, 69);
-assert.deepEqual(boot.venueChecklist.fields, sourceVenueTemplate.fields);
+assert.deepEqual(boot.venueChecklist.fields, scopeVenueChecklist(sourceVenueTemplate).fields);
 assert.equal(boot.venueChecklist.sourceName, sourceVenueTemplate.sourceName);
 assert.equal(sourceVenueTemplate.venues.length, 10);
 try {

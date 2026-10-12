@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
-import type { Collection, PlanState, Proposal } from '../src/types';
+import type { Collection, PlanState, Proposal, VenueChecklistField } from '../src/types';
+import { normalizeVenue } from '../src/lib/venue-checklist';
 
 export class ValidationError extends Error {}
 const str = (max = 2000) => z.string().max(max);
@@ -10,16 +11,22 @@ const date = z.string().refine(v => v === '' || (/^\d{4}-\d{2}-\d{2}$/.test(v) &
 const source = { sourceId:str(100).optional() };
 export const venueFieldId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/);
 export const venueAnswerSchema = z.object({ value:str(), checked:z.boolean(), rating:z.enum(['', '만족', '보통', '아쉬움']) });
+const venueAnswersSchema = z.record(venueFieldId, venueAnswerSchema).refine(answers => Object.keys(answers).length <= 120, '체크리스트는 120개 항목까지 기록할 수 있어요.');
+export const venueHallSchema = z.object({ id, name:str(100).trim().min(1), answers:venueAnswersSchema });
+const venueInputSchema = z.object({ id, name:str(300).min(1), status:z.enum(['researching', 'contacted', 'booked']), visitDate:date, contact:str(300), url:str(2000).refine(v => !v || /^https?:\/\//i.test(v), 'http(s) 주소를 입력해 주세요.'), notes:str(), answers:venueAnswersSchema, halls:z.array(venueHallSchema).min(1).max(20).optional() })
+  .refine(venue => !venue.halls || new Set(venue.halls.map(hall => hall.id)).size === venue.halls.length, '홀 ID가 중복됩니다.');
+export const parseVenue = (input:unknown, fields?:VenueChecklistField[]) => normalizeVenue(venueInputSchema.parse(input), fields);
+export const venueSchema = venueInputSchema.transform(venue => normalizeVenue(venue));
 export const venueChecklistSchema = z.object({
   title:str(300).min(1), sourceName:str(300).optional(),
-  fields:z.array(z.object({ id:venueFieldId, category:str(100), label:str(300).min(1), question:str(2000).optional(), kind:z.enum(['comparison', 'onsite']) })).max(120)
+  fields:z.array(z.object({ id:venueFieldId, category:str(100), label:str(300).min(1), question:str(2000).optional(), kind:z.enum(['comparison', 'onsite']), scope:z.enum(['hall', 'venue']).optional() })).max(120)
 }).refine(template => new Set(template.fields.map(field => field.id)).size === template.fields.length, '체크리스트 항목 ID가 중복됩니다.');
 export const settingsSchema = z.object({ coupleNames:str(100), weddingDate:date, venue:str(300), totalBudget:money, guestTarget:z.number().int().min(0).max(10000) });
 export const itemSchemas = {
   tasks:z.object({ id, title:str(300).min(1), category:str(100), dueDate:date, status:z.enum(['todo', 'doing', 'done']), notes:str(), ...source }),
   budgets:z.object({ id, title:str(300).min(1), category:str(100), planned:money, actual:money, paid:money, notes:str(), ...source }),
   vendors:z.object({ id, name:str(300).min(1), category:str(100), status:z.enum(['researching', 'contacted', 'booked']), price:money, contact:str(300), url:str(2000).refine(v => !v || /^https?:\/\//i.test(v), 'http(s) 주소를 입력해 주세요.'), notes:str(), ...source }),
-  venues:z.object({ id, name:str(300).min(1), status:z.enum(['researching', 'contacted', 'booked']), visitDate:date, contact:str(300), url:str(2000).refine(v => !v || /^https?:\/\//i.test(v), 'http(s) 주소를 입력해 주세요.'), notes:str(), answers:z.record(venueFieldId, venueAnswerSchema).refine(answers => Object.keys(answers).length <= 120, '웨딩홀 체크리스트는 120개 항목까지 기록할 수 있어요.') }),
+  venues:venueSchema,
   guests:z.object({ id, name:str(100).min(1), side:z.enum(['bride', 'groom', 'other']), group:str(100), people:z.number().int().min(1).max(100), rsvp:z.enum(['pending', 'yes', 'no']), table:str(100), contact:str(300), notes:str() }),
   timeline:z.object({ id, time:str(20), title:str(300).min(1), owner:str(100), notes:str() }),
   notes:z.object({ id, title:str(300).min(1), content:str(10000), category:str(100) })
@@ -34,8 +41,9 @@ export const stateSchema = z.object({
   activity:z.array(z.object({ id, at:str(100), text:str(500), by:str(40).optional() })).max(100), conversations:z.array(messageSchema).max(40)
 });
 
-export function validateState(input:unknown):PlanState {
+export function validateState(input:unknown, venueFields?:VenueChecklistField[]):PlanState {
   const parsed = stateSchema.parse(input) as PlanState;
+  if (venueFields && input && typeof input === 'object' && 'venues' in input && Array.isArray(input.venues)) parsed.venues = input.venues.map(venue => parseVenue(venue, venueFields));
   for (const collection of collections) { const ids = parsed[collection].map(i => i.id); if (new Set(ids).size !== ids.length) throw new ValidationError(`${collectionLabels[collection]} 항목 ID가 중복됩니다.`); }
   if (Buffer.byteLength(JSON.stringify(parsed)) > 340000) throw new ValidationError('저장 공간이 가득 찼어요. 오래된 상담 기록이나 메모를 정리해 주세요.');
   return parsed;
@@ -51,6 +59,15 @@ export function canonicalRecord(value:unknown):string {
   return JSON.stringify(sorted(value ?? null));
 }
 
+// Flat venue snapshots are compared in the same shape as the persisted migration.
+export function comparableItem(collection:Collection, input:Record<string, unknown>|null, fields?:VenueChecklistField[]) {
+  return collection === 'venues' && input ? parseVenue(input, fields) : input;
+}
+export function checkLegacyVenueWrite(collection:Collection, existing:Record<string, unknown>|undefined, item:Record<string, unknown>, expected?:Record<string, unknown>|null) {
+  // A flat client can edit its original single hall only with its matching flat snapshot.
+  if (collection === 'venues' && existing && !Object.hasOwn(item, 'halls') && (!expected || Object.hasOwn(expected, 'halls'))) throw new ValidationError('홀 정보가 변경되었어요. 최신 화면을 불러온 뒤 다시 시도해 주세요.');
+}
+
 export function applyProposals(state:PlanState, proposals:Proposal[], by?:string):PlanState {
   const next = structuredClone(state);
   for (const proposal of proposals) {
@@ -63,15 +80,16 @@ export function applyProposals(state:PlanState, proposals:Proposal[], by?:string
     if (!key || !collections.includes(key)) throw new ValidationError('지원하지 않는 항목입니다.');
     const items = next[key] as unknown as Record<string, unknown>[];
     const targetId = proposal.type === 'delete' ? proposal.itemId : proposal.item?.id;
+    const existing = items.find(i => i.id === targetId);
     if (proposal.expectedItem !== undefined) {
-      const existing = items.find(i => i.id === targetId) || null;
-      if (canonicalRecord(existing) !== canonicalRecord(proposal.expectedItem)) throw new ValidationError('항목이 그사이 변경되었어요. 변경안을 다시 요청해 주세요.');
+      if (canonicalRecord(existing ?? null) !== canonicalRecord(comparableItem(key, proposal.expectedItem))) throw new ValidationError('항목이 그사이 변경되었어요. 변경안을 다시 요청해 주세요.');
     }
     if (proposal.type === 'delete') {
       const index = items.findIndex(i => i.id === proposal.itemId);
       if (index < 0) throw new ValidationError('삭제할 항목을 찾지 못했어요. 다시 요청해 주세요.');
       items.splice(index, 1);
     } else {
+      if (proposal.item) checkLegacyVenueWrite(key, existing, proposal.item, proposal.expectedItem);
       const parsed = itemSchemas[key].safeParse(proposal.item);
       if (!parsed.success) throw new ValidationError('제안된 항목 형식이 올바르지 않아요. 다시 요청해 주세요.');
       const item = parsed.data as unknown as Record<string, unknown>;

@@ -2,14 +2,14 @@ import type { PlanState, VenueChecklist } from '../src/types';
 
 // Independently authored basic questions for couples without the private Excel library.
 export const genericVenueChecklist:VenueChecklist = { title:'웨딩홀 체크리스트', fields:[
-  { id:'location', category:'기본 정보', label:'위치와 교통', kind:'comparison' },
-  { id:'capacity', category:'기본 정보', label:'수용 인원', kind:'comparison' },
-  { id:'rental', category:'비용', label:'대관료', kind:'comparison' },
-  { id:'meal', category:'비용', label:'식대와 보증 인원', kind:'comparison' },
-  { id:'parking', category:'방문 확인', label:'주차', question:'하객이 주차하고 홀까지 편하게 이동할 수 있나요?', kind:'onsite' },
-  { id:'hall', category:'방문 확인', label:'홀과 동선', question:'좌석, 시야, 입장 동선을 직접 확인했나요?', kind:'onsite' },
-  { id:'food', category:'방문 확인', label:'식사', question:'식사 공간과 메뉴를 확인했나요?', kind:'onsite' },
-  { id:'terms', category:'계약 확인', label:'추가 비용과 취소 조건', question:'포함 사항, 추가 비용, 취소 조건을 확인했나요?', kind:'onsite' }
+  { id:'location', category:'기본 정보', label:'위치와 교통', kind:'comparison', scope:'venue' },
+  { id:'capacity', category:'기본 정보', label:'수용 인원', kind:'comparison', scope:'hall' },
+  { id:'rental', category:'비용', label:'대관료', kind:'comparison', scope:'hall' },
+  { id:'meal', category:'비용', label:'식대와 보증 인원', kind:'comparison', scope:'hall' },
+  { id:'parking', category:'방문 확인', label:'주차', question:'하객이 주차하고 홀까지 편하게 이동할 수 있나요?', kind:'onsite', scope:'venue' },
+  { id:'hall', category:'방문 확인', label:'홀과 동선', question:'좌석, 시야, 입장 동선을 직접 확인했나요?', kind:'onsite', scope:'hall' },
+  { id:'food', category:'방문 확인', label:'식사', question:'식사 공간과 메뉴를 확인했나요?', kind:'onsite', scope:'venue' },
+  { id:'terms', category:'계약 확인', label:'추가 비용과 취소 조건', question:'포함 사항, 추가 비용, 취소 조건을 확인했나요?', kind:'onsite', scope:'venue' }
 ] };
 
 // Generic starter plan for newly approved couples. Written for this app; it does not reuse the private Notion guides.

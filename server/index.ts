@@ -7,7 +7,7 @@ import { HttpError, bump, limit, mutateItem, peek, storageKind, type Item } from
 import { hashPassword, randomToken, safeEqual, sessionCookie, sessionNeedsRefresh, sha256, verifyPassword } from './auth';
 import { acceptInviteAsUser, acceptInviteWithSignup, adminAction, adminUsername, createInvite, detachMember, ensureAdmin, ensureMembership, getUser, listUsers, nameSchema, oppositeSide, passwordSchema, pendingCount, publicUser, resolveInvite, revokeInvite, sessionUser, sideSchema, signUp, updateUser, usernameSchema, workspaceInfo, type UserRecord } from './accounts';
 import { MAIN_WORKSPACE, addMaterial, getMaterials, getState, getVenueChecklist, mutateState, removeMaterial, saveState, uploadedMaterials } from './store';
-import { ValidationError, addActivity, applyProposals, canonicalRecord, collectionLabels, collections, itemLabel, itemSchemas, settingsSchema, validateState } from './model';
+import { ValidationError, addActivity, applyProposals, canonicalRecord, checkLegacyVenueWrite, collectionLabels, collections, comparableItem, itemLabel, itemSchemas, parseVenue, settingsSchema, validateState } from './model';
 import { runAgent } from './agent';
 import { deleteUpload, matchesSignature, mimeByExtension, mimeOf, readLocalFile, remoteFiles, saveUpload, signedUrl } from './files';
 
@@ -176,8 +176,9 @@ export async function handler(event:Event):Promise<Result> {
       const { state:incoming, version } = z.object({ state:z.record(z.string(), z.unknown()), version:z.number().int().positive() }).parse(parseBody(event));
       const current = await getState(ws);
       if (current.version !== version) throw new HttpError(409, '다른 화면에서 먼저 변경되었어요. 최신 내용을 불러온 뒤 다시 시도해 주세요.', 'conflict');
+      const venueFields = (await getVenueChecklist(ws)).fields;
       let next:PlanState;
-      try { next = validateState({ ...incoming, venues:Object.hasOwn(incoming, 'venues') ? incoming.venues : current.venues, version:current.version, updatedAt:current.updatedAt, activity:current.activity, conversations:current.conversations }); }
+      try { next = validateState({ ...incoming, venues:Object.hasOwn(incoming, 'venues') ? incoming.venues : current.venues, version:current.version, updatedAt:current.updatedAt, activity:current.activity, conversations:current.conversations }, venueFields); }
       catch (e) { if (e instanceof z.ZodError) throw new HttpError(400, '백업 파일 형식이 올바르지 않아요. 이 앱에서 내보낸 JSON 파일인지 확인해 주세요.'); throw e; }
       addActivity(next, '백업 파일로 노트를 복원했어요', user.name);
       return json(200, { state:await saveState(ws, next, version) });
@@ -185,11 +186,14 @@ export async function handler(event:Event):Promise<Result> {
     // Item writes carry the copy the person was looking at; a partner's newer edit is never silently overwritten.
     if (path === '/api/items' && method === 'POST') {
       const { collection, item, expected } = z.object({ collection:collectionSchema, item:z.record(z.string(), z.unknown()), expected:z.record(z.string(), z.unknown()).nullable().optional() }).parse(parseBody(event));
-      const parsed = itemSchemas[collection].parse(item) as unknown as Record<string, unknown>;
+      const venueFields = collection === 'venues' ? (await getVenueChecklist(ws)).fields : undefined;
+      const parsed = (collection === 'venues' ? parseVenue(item, venueFields) : itemSchemas[collection].parse(item)) as unknown as Record<string, unknown>;
+      const normalizedExpected = expected === undefined ? undefined : comparableItem(collection, expected, venueFields);
       const state = await mutateState(ws, draft => {
         const rows = draft[collection] as unknown as Record<string, unknown>[];
         const index = rows.findIndex(row => row.id === parsed.id); const previous = rows[index];
-        if (expected !== undefined && canonical(previous ?? null) !== canonical(expected)) throw stale();
+        if (normalizedExpected !== undefined && canonical(previous ?? null) !== canonical(normalizedExpected)) throw stale();
+        checkLegacyVenueWrite(collection, previous, item, expected);
         if (index >= 0) rows[index] = parsed; else rows.push(parsed);
         const verb = !previous ? '추가' : collection === 'tasks' && previous.status !== parsed.status && parsed.status === 'done' ? '완료' : '수정';
         addActivity(draft, `${collectionLabels[collection]} ${verb} · ${itemLabel(parsed)}`, user.name);
@@ -198,11 +202,12 @@ export async function handler(event:Event):Promise<Result> {
     }
     if (path === '/api/items/delete' && method === 'POST') {
       const { collection, id, expected } = z.object({ collection:collectionSchema, id:z.string().min(1).max(100), expected:z.record(z.string(), z.unknown()).optional() }).parse(parseBody(event));
+      const normalizedExpected = expected ? comparableItem(collection, expected, collection === 'venues' ? (await getVenueChecklist(ws)).fields : undefined) : undefined;
       const state = await mutateState(ws, draft => {
         const rows = draft[collection] as unknown as Record<string, unknown>[];
         const index = rows.findIndex(row => row.id === id);
         if (index < 0) return null;
-        if (expected && canonical(rows[index]) !== canonical(expected)) throw stale();
+        if (normalizedExpected && canonical(rows[index]) !== canonical(normalizedExpected)) throw stale();
         const [removed] = rows.splice(index, 1);
         addActivity(draft, `${collectionLabels[collection]} 삭제 · ${itemLabel(removed)}`, user.name);
       });
